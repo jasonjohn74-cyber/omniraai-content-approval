@@ -178,7 +178,9 @@ function ContentCard({item,onUpdate,onDelete,busy}){
     const usr=`Revise the following ${item.formatLabel||item.formatId} copy based on the revision notes below.\n\nOriginal brief: ${item.brief||'Not specified'}\nLanguage: ${item.language||'English'}\nTone: ${item.tone||'Use brand voice'}\n\nCurrent copy:\n${vars[selVar]||''}\n\nRevision notes from reviewer: ${note}\n\nWrite ONLY the revised copy. No preamble, no explanation, no labels. Output the copy directly.`;
     try{
       const res=await fetch(N8N_PROXY,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({system:sys,prompt:usr})});
-      const data=await res.json();
+      const rawText=await res.text();
+      if(!rawText||rawText.trim()===''){throw new Error('n8n returned an empty response — wait a few seconds and try again');}
+      let data;try{data=JSON.parse(rawText);}catch{throw new Error('Invalid response from n8n: '+rawText.slice(0,120));}
       const newText=(data?.content?.[0]?.text||data?.[0]?.content?.[0]?.text||data?.body?.content?.[0]?.text||'').trim();
       if(newText){
         const newVars=[...vars];newVars[selVar]=newText;
