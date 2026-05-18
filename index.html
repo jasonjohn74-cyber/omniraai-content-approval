@@ -1,0 +1,479 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>OmniraAI — Content Approval</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0;}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#05080f;color:#cfe0f5;}
+input,select,textarea,button{font-family:inherit;}
+::-webkit-scrollbar{width:5px;height:5px;}
+::-webkit-scrollbar-track{background:transparent;}
+::-webkit-scrollbar-thumb{background:#1a3055;border-radius:3px;}
+@keyframes spin{to{transform:rotate(360deg);}}
+@keyframes fadeIn{from{opacity:0;transform:translateY(5px);}to{opacity:1;transform:none;}}
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/htm@3/dist/htm.js"></script>
+<script>
+const{useState,useEffect,useCallback}=React;
+const html=htm.bind(React.createElement);
+
+// ── SUPABASE ────────────────────────────────────────────────
+const SB_URL='https://vchtdsfrryxnvceierkn.supabase.co';
+const SB_KEY='eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InZjaHRkc2Zycnl4bnZjZWllcmtuIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzg0ODcyMTYsImV4cCI6MjA5NDA2MzIxNn0.VuPuPqCbVYlxNpeTulkKK-IMezzxg3C05c4kWn3evqo';
+const SBH={'apikey':SB_KEY,'Authorization':`Bearer ${SB_KEY}`,'Content-Type':'application/json'};
+
+const db={
+  async getQueue(){
+    try{const r=await fetch(`${SB_URL}/rest/v1/content_queue?select=*&order=created_at.desc`,{headers:SBH});const d=await r.json();return Array.isArray(d)?d.map(x=>x.data).filter(Boolean):[];}catch{return[];}
+  },
+  async updateItem(item){
+    try{await fetch(`${SB_URL}/rest/v1/content_queue`,{method:'POST',headers:{...SBH,'Prefer':'resolution=merge-duplicates'},body:JSON.stringify({id:item.id,updated_at:item.updatedAt,client_id:item.clientId,campaign_id:item.campaignId||null,status:item.status,data:item})});}catch(e){console.error(e);}
+  },
+  async deleteItem(id){
+    try{await fetch(`${SB_URL}/rest/v1/content_queue?id=eq.${id}`,{method:'DELETE',headers:SBH});}catch(e){console.error(e);}
+  },
+  async getClients(){
+    try{const r=await fetch(`${SB_URL}/rest/v1/clients?select=*&order=created_at.desc`,{headers:SBH});const d=await r.json();return Array.isArray(d)?d.map(x=>x.data).filter(Boolean):[];}catch{return[];}
+  },
+  async logRevision(rev){
+    try{await fetch(`${SB_URL}/rest/v1/revision_history`,{method:'POST',headers:{...SBH,'Prefer':'resolution=merge-duplicates'},body:JSON.stringify(rev)});}catch(e){console.error(e);}
+  },
+  async getRevisions(queueItemId){
+    try{const r=await fetch(`${SB_URL}/rest/v1/revision_history?queue_item_id=eq.${encodeURIComponent(queueItemId)}&order=created_at.desc`,{headers:SBH});const d=await r.json();return Array.isArray(d)?d:[];}catch{return[];}
+  },
+};
+
+// ── TOKENS ──────────────────────────────────────────────────
+const C={bg:'#05080f',s1:'#0a1020',s2:'#0e1830',s3:'#13213e',bd:'#17304e',bdB:'#1d4070',ac:'#4a86f5',tx:'#cfe0f5',dm:'#5a8ab0',mt:'#274466',ok:'#34d399',wn:'#fbbf24',er:'#f87171',pu:'#a78bfa',tl:'#2dd4bf',or:'#fb923c'};
+
+const STATUS={
+  pending_review:     {l:'Pending Review',    c:C.wn,bg:'rgba(251,191,36,0.10)', icon:'⏳'},
+  revision_requested: {l:'Revision Needed',   c:C.pu,bg:'rgba(167,139,250,0.10)',icon:'✏️'},
+  approved:           {l:'Approved',          c:C.ok,bg:'rgba(52,211,153,0.10)', icon:'✓'},
+  rejected:           {l:'Rejected',          c:C.er,bg:'rgba(248,113,113,0.10)',icon:'✗'},
+  published:          {l:'Published',         c:C.tl,bg:'rgba(45,212,191,0.10)', icon:'🚀'},
+};
+
+const FORMATS={
+  ig_caption:{icon:'📸',label:'Instagram Caption'},
+  tiktok_caption:{icon:'🎵',label:'TikTok Caption'},
+  fb_caption:{icon:'📘',label:'Facebook Caption'},
+  ad_hook:{icon:'🎣',label:'Ad Hook'},
+  ad_headline:{icon:'📢',label:'Ad Headline'},
+  ad_body:{icon:'📝',label:'Ad Body Copy'},
+  email_subject:{icon:'📧',label:'Email Subject'},
+  email_preview:{icon:'👁',label:'Email Preview'},
+  email_body:{icon:'📨',label:'Email Body'},
+  whatsapp:{icon:'💬',label:'WhatsApp Message'},
+  shopee_title:{icon:'🛍',label:'Shopee Title'},
+  shopee_desc:{icon:'🛒',label:'Shopee Description'},
+  story_script:{icon:'🎬',label:'Story/Reel Script'},
+  sms_blast:{icon:'📱',label:'SMS Blast'},
+  linkedin_post:{icon:'💼',label:'LinkedIn Post'},
+};
+
+const now=()=>new Date().toISOString();
+const uid=()=>Math.random().toString(36).slice(2,9)+Date.now().toString(36).slice(-4);
+const fmtdt=d=>d?new Date(d).toLocaleString('en-MY',{day:'numeric',month:'short',hour:'2-digit',minute:'2-digit'}):'—';
+const varLabel=i=>String.fromCharCode(65+i);
+
+// ── SHARED UI ────────────────────────────────────────────────
+function Spinner(){return html`<div style=${{display:'flex',alignItems:'center',justifyContent:'center',gap:10,padding:'80px 20px',color:C.dm,fontSize:13}}>
+  <div style=${{width:18,height:18,border:`2px solid ${C.bd}`,borderTop:`2px solid ${C.ac}`,borderRadius:'50%',animation:'spin 0.8s linear infinite'}}></div>Loading queue…
+</div>`;}
+
+function Badge({status}){
+  const s=STATUS[status]||{l:status,c:C.dm,bg:'transparent',icon:''};
+  return html`<span style=${{background:s.bg,color:s.c,border:`0.5px solid ${s.c}40`,borderRadius:20,padding:'3px 10px',fontSize:11,fontWeight:600,letterSpacing:'0.3px',whiteSpace:'nowrap'}}>${s.icon} ${s.l}</span>`;
+}
+
+function Collapsible({title,color=C.ac,children}){
+  const[open,setOpen]=useState(false);
+  return html`<div style=${{marginTop:8}}>
+    <button onClick=${()=>setOpen(!open)} style=${{background:'transparent',border:`0.5px solid ${C.bd}`,borderRadius:6,color:C.dm,padding:'5px 11px',fontSize:11,cursor:'pointer',width:'100%',textAlign:'left',display:'flex',justifyContent:'space-between',alignItems:'center'}}>
+      <span style=${{color}}>${title}</span>
+      <span style=${{color:C.mt,fontSize:10}}>${open?'▲ hide':'▼ show'}</span>
+    </button>
+    ${open&&html`<div style=${{background:C.s1,border:`0.5px solid ${C.bd}`,borderRadius:'0 0 6px 6px',padding:'12px 14px',animation:'fadeIn 0.15s ease'}}>${children}</div>`}
+  </div>`;
+}
+
+function SpecRow({label,value}){
+  if(!value||(Array.isArray(value)&&value.length===0))return null;
+  const display=Array.isArray(value)?value.join(', '):String(value);
+  return html`<div style=${{marginBottom:7}}>
+    <span style=${{color:C.dm,fontSize:10,textTransform:'uppercase',letterSpacing:'0.5px'}}>${label}</span>
+    <div style=${{color:C.tx,fontSize:12,marginTop:2,lineHeight:1.6}}>${display}</div>
+  </div>`;
+}
+
+// ── CONTENT CARD ─────────────────────────────────────────────
+function ContentCard({item,onUpdate,onDelete,busy}){
+  const[note,setNote]=useState(item.reviewerNotes||'');
+  const[selVar,setSelVar]=useState(item.selectedVariation||0);
+  const[copied,setCopied]=useState(false);
+  const[editing,setEditing]=useState(false);
+  const[editText,setEditText]=useState('');
+  const[saving,setSaving]=useState(false);
+  const[revisions,setRevisions]=useState([]);
+  const[revisionsLoaded,setRevisionsLoaded]=useState(false);
+  const[showHistory,setShowHistory]=useState(false);
+  const[regenerating,setRegenerating]=useState(false);
+
+  const fmt=FORMATS[item.formatId]||{icon:'📄',label:item.formatId||'Content'};
+  const vars=item.copyVariations||[item.copyText||''];
+  const isActionable=['pending_review','revision_requested'].includes(item.status);
+  const isApproved=item.status==='approved';
+  const SOURCE_STYLE={human_edit:{c:C.ac,l:'Human Edit'},claude_regeneration:{c:C.pu,l:'AI Regen'},original:{c:C.dm,l:'Original'},restored:{c:C.tl,l:'Restored'}};
+
+  const borderColor=item.status==='pending_review'?C.bdB
+    :item.status==='approved'?C.ok+'50'
+    :item.status==='revision_requested'?C.pu+'50'
+    :C.bd;
+
+  async function loadRevisions(){const r=await db.getRevisions(item.id);setRevisions(r);setRevisionsLoaded(true);}
+  async function toggleHistory(){const next=!showHistory;setShowHistory(next);if(next&&!revisionsLoaded)await loadRevisions();}
+
+  async function selectVar(i){setSelVar(i);await onUpdate({...item,selectedVariation:i,updatedAt:now()});}
+
+  function startEdit(){setEditText(vars[selVar]||'');setEditing(true);}
+  function cancelEdit(){setEditing(false);}
+
+  async function saveEdit(){
+    const trimmed=editText.trim();
+    if(!trimmed||trimmed===vars[selVar]){setEditing(false);return;}
+    setSaving(true);
+    const newVars=[...vars];newVars[selVar]=trimmed;
+    const updated={...item,copyVariations:newVars,updatedAt:now()};
+    const vNum=revisionsLoaded?revisions.length+1:1;
+    await db.logRevision({id:uid(),queue_item_id:item.id,client_id:item.clientId||null,campaign_id:item.campaignId||null,asset_type:'copy',format_id:item.formatId,variant_label:varLabel(selVar),version_number:vNum,content:trimmed,source:'human_edit',revision_notes:note||null,status:'active',created_by:'Jason',data:updated});
+    await onUpdate(updated);
+    const r=await db.getRevisions(item.id);setRevisions(r);setRevisionsLoaded(true);
+    setSaving(false);setEditing(false);
+  }
+
+  async function restoreRevision(rev){
+    const idx=Math.max(0,'ABCDEFGHIJ'.indexOf(rev.variant_label||'A'));
+    const newVars=[...vars];newVars[idx]=rev.content;
+    const updated={...item,copyVariations:newVars,updatedAt:now()};
+    await db.logRevision({id:uid(),queue_item_id:item.id,client_id:item.clientId||null,campaign_id:item.campaignId||null,asset_type:'copy',format_id:item.formatId,variant_label:rev.variant_label||varLabel(idx),version_number:revisions.length+1,content:rev.content,source:'human_edit',revision_notes:`Restored from v${rev.version_number}`,status:'restored',created_by:'Jason',data:updated});
+    await onUpdate(updated);
+    const r=await db.getRevisions(item.id);setRevisions(r);
+  }
+
+  async function doApprove(){await onUpdate({...item,status:'approved',selectedVariation:selVar,approvedAt:now(),updatedAt:now(),reviewerNotes:note||null});}
+  async function doRevision(){
+    if(!note.trim()){alert('Add revision notes — Claude will use these to regenerate the copy.');return;}
+    setRegenerating(true);
+    await onUpdate({...item,status:'revision_requested',reviewerNotes:note,updatedAt:now()});
+    const N8N_PROXY='https://n8n-y8wq-production.up.railway.app/webhook/claude-proxy';
+    const sys=`You are an expert marketing copywriter for ${item.clientName||'the brand'}. You are revising existing marketing copy based on reviewer feedback.`;
+    const usr=`Revise the following ${item.formatLabel||item.formatId} copy based on the revision notes below.\n\nOriginal brief: ${item.brief||'Not specified'}\nLanguage: ${item.language||'English'}\nTone: ${item.tone||'Use brand voice'}\n\nCurrent copy:\n${vars[selVar]||''}\n\nRevision notes from reviewer: ${note}\n\nWrite ONLY the revised copy. No preamble, no explanation, no labels. Output the copy directly.`;
+    try{
+      const res=await fetch(N8N_PROXY,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({system:sys,prompt:usr})});
+      const data=await res.json();
+      const newText=(data?.content?.[0]?.text||data?.[0]?.content?.[0]?.text||data?.body?.content?.[0]?.text||'').trim();
+      if(newText){
+        const newVars=[...vars];newVars[selVar]=newText;
+        const vNum=revisionsLoaded?revisions.length+1:1;
+        await db.logRevision({id:uid(),queue_item_id:item.id,client_id:item.clientId||null,campaign_id:item.campaignId||null,asset_type:'copy',format_id:item.formatId,variant_label:varLabel(selVar),version_number:vNum,content:newText,source:'claude_regeneration',revision_notes:note,status:'active',created_by:'Claude',data:{...item,copyVariations:newVars}});
+        const updated={...item,copyVariations:newVars,status:'pending_review',reviewerNotes:note,updatedAt:now()};
+        await onUpdate(updated);
+        const r=await db.getRevisions(item.id);setRevisions(r);setRevisionsLoaded(true);
+        setNote('');
+      }else{alert('Claude returned empty response. Notes saved — try again.');}
+    }catch(e){alert('Regeneration failed: '+e.message+'\nRevision notes have been saved.');}
+    setRegenerating(false);
+  }
+  async function doReject(){await onUpdate({...item,status:'rejected',reviewerNotes:note||null,updatedAt:now()});}
+  async function doPublish(){await onUpdate({...item,status:'published',publishedAt:now(),updatedAt:now()});}
+  async function copyText(){try{await navigator.clipboard.writeText(vars[selVar]||'');setCopied(true);setTimeout(()=>setCopied(false),2000);}catch{window.prompt('Copy this text:',vars[selVar]||'');}}
+
+  return html`<div style=${{background:C.s1,border:`0.5px solid ${borderColor}`,borderRadius:10,marginBottom:12,overflow:'hidden',animation:'fadeIn 0.2s ease'}}>
+
+    <!-- Header -->
+    <div style=${{padding:'13px 16px',display:'flex',justifyContent:'space-between',alignItems:'flex-start',gap:12,borderBottom:`0.5px solid ${C.bd}`}}>
+      <div style=${{flex:1,minWidth:0}}>
+        <div style=${{display:'flex',alignItems:'center',gap:7,flexWrap:'wrap',marginBottom:4}}>
+          <span style=${{fontSize:15}}>${fmt.icon}</span>
+          <span style=${{fontWeight:600,fontSize:14,color:C.tx}}>${item.clientName||'Unknown Client'}</span>
+          <span style=${{color:C.dm,fontSize:12}}>${fmt.label}</span>
+          ${item.platform&&item.platform!=='multi'?html`<span style=${{background:C.s3,border:`0.5px solid ${C.bd}`,borderRadius:4,padding:'1px 7px',fontSize:11,color:C.dm}}>${item.platform}</span>`:''}
+          ${item.campaignName?html`<span style=${{color:C.ac,fontSize:11}}>📋 ${item.campaignName}</span>`:''}
+        </div>
+        <div style=${{color:C.mt,fontSize:11}}>Submitted ${fmtdt(item.createdAt)} · ${vars.length} variation${vars.length!==1?'s':''} · ${item.language||'English'}</div>
+      </div>
+      <div style=${{display:'flex',flexDirection:'column',alignItems:'flex-end',gap:6,flexShrink:0}}>
+        <${Badge} status=${item.status} />
+        <button onClick=${()=>onDelete(item.id)} style=${{background:'transparent',border:'none',color:C.mt,cursor:'pointer',fontSize:12,padding:'1px 4px',lineHeight:1}} title="Delete item">✕</button>
+      </div>
+    </div>
+
+    <!-- Brief strip -->
+    ${item.brief?html`<div style=${{padding:'8px 16px',background:C.s2+'60',borderBottom:`0.5px solid ${C.bd}`,fontSize:12,color:C.dm,lineHeight:1.5}}>
+      <span style=${{color:C.mt,fontSize:10,textTransform:'uppercase',letterSpacing:'0.5px',marginRight:6}}>Brief</span>${item.brief}
+    </div>`:''}
+
+    <div style=${{padding:'14px 16px'}}>
+
+      <!-- Variation tabs -->
+      ${vars.length>1?html`<div style=${{display:'flex',gap:6,flexWrap:'wrap',marginBottom:10}}>
+        ${vars.map((v,i)=>html`<button key=${i} onClick=${()=>selectVar(i)} style=${{background:selVar===i?C.ac:C.s3,color:selVar===i?'#fff':C.dm,border:`0.5px solid ${selVar===i?C.ac:C.bd}`,borderRadius:5,padding:'4px 11px',fontSize:11,cursor:'pointer'}}>
+          Var ${varLabel(i)}${selVar===i?' ✓':''}
+        </button>`)}
+      </div>`:''}
+
+      <!-- Copy text / inline edit -->
+      ${editing
+        ?html`<div>
+          <textarea value=${editText} onInput=${e=>setEditText(e.target.value)} autoFocus
+            style=${{background:C.s2,border:`1px solid ${C.ac}`,borderRadius:8,padding:'12px 14px',fontSize:13,lineHeight:1.75,color:C.tx,width:'100%',resize:'vertical',minHeight:160,outline:'none'}}/>
+          <div style=${{display:'flex',gap:7,marginTop:7,justifyContent:'flex-end'}}>
+            <button onClick=${cancelEdit} style=${{background:'transparent',border:`0.5px solid ${C.bd}`,borderRadius:5,color:C.dm,padding:'5px 13px',fontSize:12,cursor:'pointer'}}>Cancel</button>
+            <button onClick=${saveEdit} disabled=${saving} style=${{background:C.ac,border:'none',borderRadius:5,color:'#fff',padding:'5px 16px',fontSize:12,fontWeight:600,cursor:saving?'default':'pointer',opacity:saving?0.6:1}}>${saving?'Saving…':'Save Edit'}</button>
+          </div>
+        </div>`
+        :html`<div>
+          <div style=${{background:C.s2,border:`0.5px solid ${isApproved?C.ok+'50':C.bd}`,borderRadius:8,padding:'12px 14px',fontSize:13,lineHeight:1.75,color:C.tx,whiteSpace:'pre-wrap',maxHeight:220,overflowY:'auto'}}>
+            ${vars[selVar]||'No copy generated'}
+          </div>
+          <div style=${{display:'flex',justifyContent:'flex-end',gap:7,marginTop:6}}>
+            <button onClick=${copyText} style=${{background:'transparent',border:`0.5px solid ${C.bd}`,borderRadius:5,color:copied?C.ok:C.dm,padding:'4px 10px',fontSize:11,cursor:'pointer'}}>${copied?'✓ Copied':'Copy text'}</button>
+            <button onClick=${startEdit} style=${{background:'transparent',border:`0.5px solid ${C.bdB}`,borderRadius:5,color:C.dm,padding:'4px 10px',fontSize:11,cursor:'pointer'}}>✏ Edit copy</button>
+          </div>
+        </div>`
+      }
+
+      <!-- Revision history -->
+      <div style=${{marginTop:8}}>
+        <button onClick=${toggleHistory} style=${{background:'transparent',border:`0.5px solid ${C.bd}`,borderRadius:6,color:C.dm,padding:'5px 11px',fontSize:11,cursor:'pointer',width:'100%',textAlign:'left',display:'flex',justifyContent:'space-between',alignItems:'center'}}>
+          <span style=${{color:C.or}}>🕑 Revision History${revisionsLoaded?' ('+revisions.length+')':''}</span>
+          <span style=${{color:C.mt,fontSize:10}}>${showHistory?'▲ hide':'▼ show'}</span>
+        </button>
+        ${showHistory&&html`<div style=${{background:C.s1,border:`0.5px solid ${C.bd}`,borderTop:'none',borderRadius:'0 0 6px 6px',padding:'10px 12px',animation:'fadeIn 0.15s ease'}}>
+          ${!revisionsLoaded
+            ?html`<div style=${{color:C.dm,fontSize:12,padding:'8px 0'}}>Loading…</div>`
+            :revisions.length===0
+              ?html`<div style=${{color:C.mt,fontSize:12,padding:'8px 0'}}>No edits logged yet. Use "Edit copy" above to start tracking revisions.</div>`
+              :revisions.map((rev,i)=>{
+                  const src=SOURCE_STYLE[rev.source]||{c:C.dm,l:rev.source||'Edit'};
+                  return html`<div key=${i} style=${{borderBottom:i<revisions.length-1?`0.5px solid ${C.bd}`:'none',paddingBottom:10,marginBottom:10}}>
+                    <div style=${{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:4,flexWrap:'wrap',gap:4}}>
+                      <div style=${{display:'flex',gap:6,alignItems:'center'}}>
+                        <span style=${{background:`${src.c}20`,color:src.c,border:`0.5px solid ${src.c}40`,borderRadius:10,padding:'1px 7px',fontSize:10,fontWeight:600}}>${src.l}</span>
+                        <span style=${{color:C.mt,fontSize:10}}>Var ${rev.variant_label||'A'} · v${rev.version_number}</span>
+                      </div>
+                      <span style=${{color:C.mt,fontSize:10}}>${fmtdt(rev.created_at)}</span>
+                    </div>
+                    ${rev.revision_notes?html`<div style=${{color:C.dm,fontSize:11,marginBottom:5,fontStyle:'italic'}}>"${rev.revision_notes}"</div>`:''}
+                    <div style=${{color:C.tx,fontSize:12,lineHeight:1.6,background:C.s2,borderRadius:6,padding:'6px 9px',whiteSpace:'pre-wrap',maxHeight:80,overflowY:'auto',marginBottom:5}}>
+                      ${(rev.content||'').slice(0,300)}${(rev.content||'').length>300?'…':''}
+                    </div>
+                    <button onClick=${()=>restoreRevision(rev)} style=${{background:'transparent',border:`0.5px solid ${C.bd}`,borderRadius:4,color:C.dm,padding:'3px 9px',fontSize:10,cursor:'pointer'}}>↩ Restore this version</button>
+                  </div>`;
+                })
+          }
+        </div>`}
+      </div>
+
+      <!-- Specs -->
+      <${Collapsible} title="🎨 Image Spec (Canva — pending)" color=${C.pu}>
+        <${SpecRow} label="Platform" value=${item.imageSpec?.platform} />
+        <${SpecRow} label="Dimensions" value=${item.imageSpec?.dimensions} />
+        <${SpecRow} label="Brand Colors" value=${item.imageSpec?.colorPalette} />
+        <${SpecRow} label="Suggested Headline" value=${item.imageSpec?.suggestedHeadline} />
+        <${SpecRow} label="Visual Brief" value=${item.imageSpec?.visualBrief} />
+        ${item.imageSpec?.notes?html`<div style=${{color:C.mt,fontSize:11,marginTop:6,borderTop:`0.5px solid ${C.bd}`,paddingTop:6}}>${item.imageSpec.notes}</div>`:''}
+      </${Collapsible}>
+
+      <${Collapsible} title="🎬 Video Spec (HeyGen — pending)" color=${C.tl}>
+        <${SpecRow} label="Duration" value=${item.videoSpec?.duration} />
+        <${SpecRow} label="Style" value=${item.videoSpec?.style} />
+        <div style=${{marginBottom:7}}>
+          <span style=${{color:C.dm,fontSize:10,textTransform:'uppercase',letterSpacing:'0.5px'}}>Script</span>
+          <div style=${{color:C.tx,fontSize:12,marginTop:4,lineHeight:1.6,background:C.s2,borderRadius:6,padding:'8px 10px',whiteSpace:'pre-wrap',maxHeight:120,overflowY:'auto'}}>${item.videoSpec?.script||'—'}</div>
+        </div>
+        ${item.videoSpec?.notes?html`<div style=${{color:C.mt,fontSize:11,borderTop:`0.5px solid ${C.bd}`,paddingTop:6}}>${item.videoSpec.notes}</div>`:''}
+      </${Collapsible}>
+
+      <!-- Status banners -->
+      ${item.status==='revision_requested'&&item.reviewerNotes?html`<div style=${{background:'rgba(167,139,250,0.08)',border:`0.5px solid ${C.pu}40`,borderRadius:6,padding:'10px 12px',marginTop:12,fontSize:12,color:C.pu}}>
+        <div style=${{fontSize:10,textTransform:'uppercase',letterSpacing:'0.5px',marginBottom:4}}>Revision Notes</div>
+        ${item.reviewerNotes}
+      </div>`:''}
+      ${item.status==='rejected'&&item.reviewerNotes?html`<div style=${{background:'rgba(248,113,113,0.08)',border:`0.5px solid ${C.er}40`,borderRadius:6,padding:'10px 12px',marginTop:12,fontSize:12,color:C.er}}>
+        <div style=${{fontSize:10,textTransform:'uppercase',letterSpacing:'0.5px',marginBottom:4}}>Rejection Reason</div>
+        ${item.reviewerNotes}
+      </div>`:''}
+      ${item.status==='approved'?html`<div style=${{color:C.ok,fontSize:11,marginTop:10}}>✓ Approved ${fmtdt(item.approvedAt)}</div>`:''}
+      ${item.status==='published'?html`<div style=${{color:C.tl,fontSize:11,marginTop:10}}>🚀 Published ${fmtdt(item.publishedAt)}</div>`:''}
+
+      <!-- Action area -->
+      ${isActionable?html`<div style=${{marginTop:14,paddingTop:14,borderTop:`0.5px solid ${C.bd}`}}>
+        <textarea
+          placeholder="Notes for revision or rejection (required for revision requests)…"
+          value=${note}
+          onInput=${e=>setNote(e.target.value)}
+          style=${{background:C.s2,border:`0.5px solid ${C.bd}`,borderRadius:6,color:C.tx,padding:'8px 11px',fontSize:12,width:'100%',resize:'vertical',minHeight:64,outline:'none',marginBottom:10,lineHeight:1.5}}
+        />
+        <div style=${{display:'flex',gap:8,flexWrap:'wrap'}}>
+          <button onClick=${doApprove} disabled=${busy} style=${{background:C.ok,color:'#0a1a0a',border:'none',borderRadius:6,padding:'8px 20px',fontSize:13,fontWeight:700,cursor:busy?'default':'pointer',opacity:busy?0.6:1}}>
+            ✓ Approve
+          </button>
+          <button onClick=${doRevision} disabled=${busy||regenerating} style=${{background:regenerating?`${C.pu}20`:'transparent',color:C.pu,border:`0.5px solid ${C.pu}`,borderRadius:6,padding:'8px 15px',fontSize:13,cursor:(busy||regenerating)?'default':'pointer',opacity:(busy||regenerating)?0.8:1}}>
+            ${regenerating?'🤖 Claude is rewriting…':'✏ Request Revision'}
+          </button>
+          <button onClick=${doReject} disabled=${busy} style=${{background:'transparent',color:C.er,border:`0.5px solid ${C.er}`,borderRadius:6,padding:'8px 15px',fontSize:13,cursor:busy?'default':'pointer',opacity:busy?0.6:1}}>
+            ✗ Reject
+          </button>
+        </div>
+      </div>`:''}
+
+      ${isApproved?html`<div style=${{marginTop:14,paddingTop:14,borderTop:`0.5px solid ${C.bd}`}}>
+        <button onClick=${doPublish} disabled=${busy} style=${{background:C.tl,color:'#001a18',border:'none',borderRadius:6,padding:'8px 20px',fontSize:13,fontWeight:700,cursor:busy?'default':'pointer',opacity:busy?0.6:1}}>
+          🚀 Mark as Published
+        </button>
+      </div>`:''}
+
+    </div>
+  </div>`;
+}
+
+// ── APP ──────────────────────────────────────────────────────
+function App(){
+  const[items,setItems]=useState([]);
+  const[clients,setClients]=useState([]);
+  const[loading,setLoading]=useState(true);
+  const[busy,setBusy]=useState({});
+  const[filterStatus,setFilterStatus]=useState('pending_review');
+  const[filterClient,setFilterClient]=useState('all');
+  const[filterPlatform,setFilterPlatform]=useState('all');
+  const[lastRefresh,setLastRefresh]=useState(null);
+
+  const loadData=useCallback(async(silent=false)=>{
+    if(!silent)setLoading(true);
+    const[q,c]=await Promise.all([db.getQueue(),db.getClients()]);
+    setItems(q);setClients(c);setLastRefresh(new Date());
+    if(!silent)setLoading(false);
+  },[]);
+
+  useEffect(()=>{loadData();},[loadData]);
+  useEffect(()=>{const t=setInterval(()=>loadData(true),60000);return()=>clearInterval(t);},[loadData]);
+
+  async function handleUpdate(item){
+    setBusy(p=>({...p,[item.id]:true}));
+    await db.updateItem(item);
+    setItems(prev=>prev.map(i=>i.id===item.id?item:i));
+    setBusy(p=>({...p,[item.id]:false}));
+  }
+  async function handleDelete(id){
+    if(!confirm('Remove this item from the queue?'))return;
+    await db.deleteItem(id);
+    setItems(prev=>prev.filter(i=>i.id!==id));
+  }
+
+  // Stats
+  const counts={all:items.length};
+  Object.keys(STATUS).forEach(s=>{counts[s]=items.filter(i=>i.status===s).length;});
+
+  // Unique platforms for filter
+  const platforms=[...new Set(items.map(i=>i.platform||'multi'))].filter(Boolean);
+
+  // Filtered list
+  const filtered=items.filter(item=>{
+    if(filterStatus!=='all'&&item.status!==filterStatus)return false;
+    if(filterClient!=='all'&&item.clientId!==filterClient)return false;
+    if(filterPlatform!=='all'&&(item.platform||'multi')!==filterPlatform)return false;
+    return true;
+  });
+
+  const statusTabs=[
+    {k:'all',l:'All'},
+    {k:'pending_review',l:'Pending'},
+    {k:'revision_requested',l:'Revision Needed'},
+    {k:'approved',l:'Approved'},
+    {k:'rejected',l:'Rejected'},
+    {k:'published',l:'Published'},
+  ];
+
+  return html`<div style=${{minHeight:'100vh',background:C.bg}}>
+
+    <!-- Header -->
+    <div style=${{background:C.s1,borderBottom:`0.5px solid ${C.bd}`,padding:'0 20px',position:'sticky',top:0,zIndex:100}}>
+      <div style=${{maxWidth:960,margin:'0 auto',display:'flex',justifyContent:'space-between',alignItems:'center',height:52}}>
+        <div style=${{display:'flex',alignItems:'center',gap:10}}>
+          <span style=${{fontSize:17,fontWeight:700,color:C.tx,letterSpacing:'-0.3px'}}>OmniraAI</span>
+          <span style=${{color:C.bd}}>·</span>
+          <span style=${{fontSize:13,color:C.dm}}>Content Approval</span>
+        </div>
+        <div style=${{display:'flex',alignItems:'center',gap:10}}>
+          ${lastRefresh?html`<span style=${{fontSize:11,color:C.mt}}>Updated ${fmtdt(lastRefresh)}</span>`:''}
+          <button onClick=${()=>loadData()} disabled=${loading} style=${{background:'transparent',border:`0.5px solid ${C.bd}`,borderRadius:6,color:C.dm,padding:'5px 13px',fontSize:12,cursor:'pointer',opacity:loading?0.5:1}}>
+            ${loading?'…':'↻ Refresh'}
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <div style=${{maxWidth:960,margin:'0 auto',padding:'20px'}}>
+
+      <!-- Stats row -->
+      <div style=${{display:'flex',gap:10,marginBottom:20,flexWrap:'wrap'}}>
+        ${Object.entries(STATUS).map(([k,cfg])=>html`<div key=${k} style=${{background:C.s1,border:`0.5px solid ${counts[k]>0?cfg.c+'50':C.bd}`,borderRadius:8,padding:'10px 16px',textAlign:'center',minWidth:110,flex:1}}>
+          <div style=${{fontSize:24,fontWeight:700,color:counts[k]>0?cfg.c:C.mt}}>${counts[k]||0}</div>
+          <div style=${{fontSize:10,color:C.dm,textTransform:'uppercase',letterSpacing:'0.5px',marginTop:2,lineHeight:1.3}}>${cfg.l}</div>
+        </div>`)}
+      </div>
+
+      <!-- Filters -->
+      <div style=${{background:C.s1,border:`0.5px solid ${C.bd}`,borderRadius:10,padding:'14px 16px',marginBottom:20}}>
+        <div style=${{display:'flex',gap:6,flexWrap:'wrap',marginBottom:12}}>
+          ${statusTabs.map(({k,l})=>html`<button key=${k} onClick=${()=>setFilterStatus(k)} style=${{background:filterStatus===k?C.ac:C.s3,color:filterStatus===k?'#fff':C.dm,border:`0.5px solid ${filterStatus===k?C.ac:C.bd}`,borderRadius:6,padding:'5px 13px',fontSize:12,cursor:'pointer'}}>
+            ${l} (${counts[k]||0})
+          </button>`)}
+        </div>
+        <div style=${{display:'flex',gap:10,flexWrap:'wrap'}}>
+          <select value=${filterClient} onChange=${e=>setFilterClient(e.target.value)} style=${{background:C.s2,border:`0.5px solid ${C.bd}`,borderRadius:6,color:C.tx,padding:'6px 10px',fontSize:12,flex:1,minWidth:160,outline:'none'}}>
+            <option value="all">All Clients (${items.length})</option>
+            ${clients.map(c=>html`<option key=${c.id} value=${c.id}>${c.basics?.brandName||c.basics?.clientName||c.id}</option>`)}
+          </select>
+          <select value=${filterPlatform} onChange=${e=>setFilterPlatform(e.target.value)} style=${{background:C.s2,border:`0.5px solid ${C.bd}`,borderRadius:6,color:C.tx,padding:'6px 10px',fontSize:12,flex:1,minWidth:140,outline:'none'}}>
+            <option value="all">All Platforms</option>
+            ${platforms.map(p=>html`<option key=${p} value=${p}>${p}</option>`)}
+          </select>
+        </div>
+      </div>
+
+      <!-- Queue list -->
+      ${loading
+        ?html`<${Spinner}/>`
+        :filtered.length===0
+          ?html`<div style=${{textAlign:'center',padding:'80px 20px',color:C.mt}}>
+            <div style=${{fontSize:32,marginBottom:12}}>${items.length===0?'📭':'🔍'}</div>
+            <div style=${{fontSize:14,marginBottom:6}}>${items.length===0?'Queue is empty':'No items match the current filters'}</div>
+            <div style=${{fontSize:12,color:C.bd}}>${items.length===0?'Trigger the n8n webhook to generate content and add it to the queue.':'Try changing the status tab or clearing the client/platform filter.'}</div>
+          </div>`
+          :filtered.map(item=>html`<${ContentCard}
+            key=${item.id}
+            item=${item}
+            onUpdate=${handleUpdate}
+            onDelete=${handleDelete}
+            busy=${!!busy[item.id]}
+          />`)
+      }
+
+    </div>
+  </div>`;
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(html`<${App}/>`);
+</script>
+</body>
+</html>
