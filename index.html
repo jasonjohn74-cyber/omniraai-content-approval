@@ -13,6 +13,7 @@ input,select,textarea,button{font-family:inherit;}
 ::-webkit-scrollbar-thumb{background:#1a3055;border-radius:3px;}
 @keyframes spin{to{transform:rotate(360deg);}}
 @keyframes fadeIn{from{opacity:0;transform:translateY(5px);}to{opacity:1;transform:none;}}
+@keyframes pulse{0%,100%{opacity:1;}50%{opacity:0.5;}}
 </style>
 </head>
 <body>
@@ -21,13 +22,14 @@ input,select,textarea,button{font-family:inherit;}
 <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
 <script src="https://unpkg.com/htm@3/dist/htm.js"></script>
 <script>
-const{useState,useEffect,useCallback}=React;
+const{useState,useEffect,useCallback,useRef}=React;
 const html=htm.bind(React.createElement);
 
 // ── SUPABASE ────────────────────────────────────────────────
 const SB_URL='https://vchtdsfrryxnvceierkn.supabase.co';
 const SB_KEY='eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InZjaHRkc2Zycnl4bnZjZWllcmtuIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzg0ODcyMTYsImV4cCI6MjA5NDA2MzIxNn0.VuPuPqCbVYlxNpeTulkKK-IMezzxg3C05c4kWn3evqo';
 const SBH={'apikey':SB_KEY,'Authorization':`Bearer ${SB_KEY}`,'Content-Type':'application/json'};
+const N8N='https://n8n-y8wq-production.up.railway.app';
 
 const db={
   async getQueue(){
@@ -48,35 +50,76 @@ const db={
   async getRevisions(queueItemId){
     try{const r=await fetch(`${SB_URL}/rest/v1/revision_history?queue_item_id=eq.${encodeURIComponent(queueItemId)}&order=created_at.desc`,{headers:SBH});const d=await r.json();return Array.isArray(d)?d:[];}catch{return[];}
   },
+  // Media asset methods
+  async getMediaAssets(filters={}){
+    try{
+      let q=`${SB_URL}/rest/v1/campaign_assets?select=*&order=created_at.desc`;
+      if(filters.status&&filters.status!=='all')q+=`&status=eq.${filters.status}`;
+      if(filters.campaign_id)q+=`&campaign_id=eq.${filters.campaign_id}`;
+      if(filters.client_id)q+=`&client_id=eq.${filters.client_id}`;
+      const r=await fetch(q,{headers:SBH});
+      const d=await r.json();
+      return Array.isArray(d)?d:[];
+    }catch{return[];}
+  },
+  async updateAsset(asset){
+    try{
+      await fetch(`${SB_URL}/rest/v1/campaign_assets?id=eq.${asset.id}`,{
+        method:'PATCH',headers:{...SBH,'Prefer':'return=minimal'},
+        body:JSON.stringify({...asset,updated_at:new Date().toISOString()})
+      });
+    }catch(e){console.error(e);}
+  },
+  async logAssetRevision(rev){
+    try{await fetch(`${SB_URL}/rest/v1/asset_revisions`,{method:'POST',headers:{...SBH,'Prefer':'resolution=merge-duplicates'},body:JSON.stringify(rev)});}catch(e){console.error(e);}
+  },
+  async getAssetRevisions(assetId){
+    try{const r=await fetch(`${SB_URL}/rest/v1/asset_revisions?asset_id=eq.${assetId}&order=revision_number.desc`,{headers:SBH});return await r.json();}catch{return[];}
+  },
+  async uploadToStorage(file,path){
+    try{
+      const r=await fetch(`${SB_URL}/storage/v1/object/campaign-assets/${path}`,{
+        method:'POST',
+        headers:{'apikey':SB_KEY,'Authorization':`Bearer ${SB_KEY}`,'Content-Type':file.type,'x-upsert':'true'},
+        body:file
+      });
+      const d=await r.json();
+      return d.Key?`${SB_URL}/storage/v1/object/public/${d.Key}`:null;
+    }catch(e){console.error('Storage upload failed:',e);return null;}
+  },
 };
 
 // ── TOKENS ──────────────────────────────────────────────────
 const C={bg:'#05080f',s1:'#0a1020',s2:'#0e1830',s3:'#13213e',bd:'#17304e',bdB:'#1d4070',ac:'#4a86f5',tx:'#cfe0f5',dm:'#5a8ab0',mt:'#274466',ok:'#34d399',wn:'#fbbf24',er:'#f87171',pu:'#a78bfa',tl:'#2dd4bf',or:'#fb923c'};
 
 const STATUS={
-  pending_review:     {l:'Pending Review',    c:C.wn,bg:'rgba(251,191,36,0.10)', icon:'⏳'},
-  revision_requested: {l:'Revision Needed',   c:C.pu,bg:'rgba(167,139,250,0.10)',icon:'✏️'},
-  approved:           {l:'Approved',          c:C.ok,bg:'rgba(52,211,153,0.10)', icon:'✓'},
-  rejected:           {l:'Rejected',          c:C.er,bg:'rgba(248,113,113,0.10)',icon:'✗'},
-  published:          {l:'Published',         c:C.tl,bg:'rgba(45,212,191,0.10)', icon:'🚀'},
+  pending_review:     {l:'Pending Review',    c:C.wn, bg:'rgba(251,191,36,0.10)',  icon:'⏳'},
+  generating:         {l:'Generating',        c:C.ac, bg:'rgba(74,134,245,0.10)',  icon:'🤖'},
+  revision_requested: {l:'Revision Needed',   c:C.pu, bg:'rgba(167,139,250,0.10)',icon:'✏️'},
+  approved:           {l:'Approved',          c:C.ok, bg:'rgba(52,211,153,0.10)',  icon:'✓'},
+  rejected:           {l:'Rejected',          c:C.er, bg:'rgba(248,113,113,0.10)',icon:'✗'},
+  published:          {l:'Published',         c:C.tl, bg:'rgba(45,212,191,0.10)',  icon:'🚀'},
 };
 
 const FORMATS={
-  ig_caption:{icon:'📸',label:'Instagram Caption'},
-  tiktok_caption:{icon:'🎵',label:'TikTok Caption'},
-  fb_caption:{icon:'📘',label:'Facebook Caption'},
-  ad_hook:{icon:'🎣',label:'Ad Hook'},
-  ad_headline:{icon:'📢',label:'Ad Headline'},
-  ad_body:{icon:'📝',label:'Ad Body Copy'},
-  email_subject:{icon:'📧',label:'Email Subject'},
-  email_preview:{icon:'👁',label:'Email Preview'},
-  email_body:{icon:'📨',label:'Email Body'},
-  whatsapp:{icon:'💬',label:'WhatsApp Message'},
-  shopee_title:{icon:'🛍',label:'Shopee Title'},
-  shopee_desc:{icon:'🛒',label:'Shopee Description'},
-  story_script:{icon:'🎬',label:'Story/Reel Script'},
-  sms_blast:{icon:'📱',label:'SMS Blast'},
+  ig_caption:{icon:'📸',label:'Instagram Caption'},tiktok_caption:{icon:'🎵',label:'TikTok Caption'},
+  fb_caption:{icon:'📘',label:'Facebook Caption'},ad_hook:{icon:'🎣',label:'Ad Hook'},
+  ad_headline:{icon:'📢',label:'Ad Headline'},ad_body:{icon:'📝',label:'Ad Body Copy'},
+  email_subject:{icon:'📧',label:'Email Subject'},email_preview:{icon:'👁',label:'Email Preview'},
+  email_body:{icon:'📨',label:'Email Body'},whatsapp:{icon:'💬',label:'WhatsApp Message'},
+  shopee_title:{icon:'🛍',label:'Shopee Title'},shopee_desc:{icon:'🛒',label:'Shopee Description'},
+  story_script:{icon:'🎬',label:'Story/Reel Script'},sms_blast:{icon:'📱',label:'SMS Blast'},
   linkedin_post:{icon:'💼',label:'LinkedIn Post'},
+};
+
+const CHANNEL_META={
+  ig_post:      {icon:'📸',label:'IG Post',      dims:'1:1 or 4:5',  type:'image'},
+  ig_story:     {icon:'📱',label:'IG Story',     dims:'9:16',         type:'image_video'},
+  ig_reel:      {icon:'🎬',label:'IG Reel',      dims:'9:16 video',   type:'video'},
+  fb_post:      {icon:'📘',label:'FB Post',      dims:'1.91:1',       type:'image'},
+  tiktok:       {icon:'🎵',label:'TikTok',       dims:'9:16 video',   type:'video'},
+  email_header: {icon:'📧',label:'Email Header', dims:'600×200px',    type:'image'},
+  wa_poster:    {icon:'💬',label:'WA Poster',    dims:'9:16 or 1:1',  type:'image'},
 };
 
 const now=()=>new Date().toISOString();
@@ -85,8 +128,8 @@ const fmtdt=d=>d?new Date(d).toLocaleString('en-MY',{day:'numeric',month:'short'
 const varLabel=i=>String.fromCharCode(65+i);
 
 // ── SHARED UI ────────────────────────────────────────────────
-function Spinner(){return html`<div style=${{display:'flex',alignItems:'center',justifyContent:'center',gap:10,padding:'80px 20px',color:C.dm,fontSize:13}}>
-  <div style=${{width:18,height:18,border:`2px solid ${C.bd}`,borderTop:`2px solid ${C.ac}`,borderRadius:'50%',animation:'spin 0.8s linear infinite'}}></div>Loading queue…
+function Spinner({msg='Loading…'}){return html`<div style=${{display:'flex',alignItems:'center',justifyContent:'center',gap:10,padding:'80px 20px',color:C.dm,fontSize:13}}>
+  <div style=${{width:18,height:18,border:`2px solid ${C.bd}`,borderTop:`2px solid ${C.ac}`,borderRadius:'50%',animation:'spin 0.8s linear infinite'}}></div>${msg}
 </div>`;}
 
 function Badge({status}){
@@ -94,28 +137,187 @@ function Badge({status}){
   return html`<span style=${{background:s.bg,color:s.c,border:`0.5px solid ${s.c}40`,borderRadius:20,padding:'3px 10px',fontSize:11,fontWeight:600,letterSpacing:'0.3px',whiteSpace:'nowrap'}}>${s.icon} ${s.l}</span>`;
 }
 
-function Collapsible({title,color=C.ac,children}){
-  const[open,setOpen]=useState(false);
-  return html`<div style=${{marginTop:8}}>
-    <button onClick=${()=>setOpen(!open)} style=${{background:'transparent',border:`0.5px solid ${C.bd}`,borderRadius:6,color:C.dm,padding:'5px 11px',fontSize:11,cursor:'pointer',width:'100%',textAlign:'left',display:'flex',justifyContent:'space-between',alignItems:'center'}}>
-      <span style=${{color}}>${title}</span>
-      <span style=${{color:C.mt,fontSize:10}}>${open?'▲ hide':'▼ show'}</span>
-    </button>
-    ${open&&html`<div style=${{background:C.s1,border:`0.5px solid ${C.bd}`,borderRadius:'0 0 6px 6px',padding:'12px 14px',animation:'fadeIn 0.15s ease'}}>${children}</div>`}
+// ── MEDIA ASSET CARD ─────────────────────────────────────────
+function MediaAssetCard({asset,onUpdate}){
+  const[feedback,setFeedback]=useState(asset.feedback||'');
+  const[revisions,setRevisions]=useState([]);
+  const[showHistory,setShowHistory]=useState(false);
+  const[historyLoaded,setHistoryLoaded]=useState(false);
+  const[regenerating,setRegenerating]=useState(false);
+  const[uploading,setUploading]=useState(false);
+  const[imgError,setImgError]=useState(false);
+  const fileRef=useRef(null);
+
+  const ch=CHANNEL_META[asset.channel]||{icon:'🖼',label:asset.channel,dims:'',type:'image'};
+  const isVideo=asset.asset_type==='video'||asset.asset_url?.match(/\.(mp4|mov|webm)/i);
+  const isActionable=['pending_review','revision_requested'].includes(asset.status);
+  const isApproved=asset.status==='approved';
+  const borderColor=asset.status==='pending_review'?C.bdB:asset.status==='approved'?C.ok+'50':asset.status==='revision_requested'?C.pu+'50':C.bd;
+
+  async function loadHistory(){
+    const r=await db.getAssetRevisions(asset.id);
+    setRevisions(r);setHistoryLoaded(true);
+  }
+  async function toggleHistory(){
+    const next=!showHistory;setShowHistory(next);
+    if(next&&!historyLoaded)await loadHistory();
+  }
+
+  async function doApprove(){
+    await onUpdate({...asset,status:'approved',approved_at:now(),feedback:feedback||null});
+  }
+  async function doReject(){
+    await onUpdate({...asset,status:'rejected',feedback:feedback||null});
+  }
+  async function doRequestRevision(){
+    if(!feedback.trim()){alert('Add feedback so AI knows what to change.');return;}
+    setRegenerating(true);
+    const updated={...asset,status:'revision_requested',feedback,revision_round:(asset.revision_round||1)+1};
+    await onUpdate(updated);
+    // Trigger n8n to regenerate
+    try{
+      await fetch(`${N8N}/webhook/regenerate-asset`,{
+        method:'POST',headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({asset_id:asset.id,feedback,channel:asset.channel,format:asset.format,prompt:asset.prompt,asset_type:asset.asset_type,revision_round:updated.revision_round})
+      });
+    }catch(e){console.error('Regeneration trigger failed:',e);}
+    setRegenerating(false);
+  }
+  async function doPublish(){
+    await onUpdate({...asset,status:'published',published_at:now()});
+  }
+
+  async function handleManualUpload(e){
+    const file=e.target.files?.[0];
+    if(!file)return;
+    setUploading(true);
+    const ext=file.name.split('.').pop();
+    const path=`${asset.campaign_id||'misc'}/${asset.channel}_${uid()}.${ext}`;
+    const url=await db.uploadToStorage(file,path);
+    if(url){
+      const revNum=(revisions.length||0)+1;
+      await db.logAssetRevision({id:uid(),asset_id:asset.id,revision_number:revNum,asset_url:url,provider:'manual_upload',feedback:'Manual upload by user',source:'manual_upload'});
+      const updated={...asset,asset_url:url,provider:'manual_upload',status:'pending_review'};
+      await onUpdate(updated);
+      setImgError(false);
+      if(historyLoaded)await loadHistory();
+    }else{
+      alert('Upload failed. Check Supabase Storage bucket "campaign-assets" exists and is public.');
+    }
+    setUploading(false);
+    e.target.value='';
+  }
+
+  return html`<div style=${{background:C.s1,border:`0.5px solid ${borderColor}`,borderRadius:10,marginBottom:12,overflow:'hidden',animation:'fadeIn 0.2s ease'}}>
+
+    <!-- Header -->
+    <div style=${{padding:'11px 14px',display:'flex',justifyContent:'space-between',alignItems:'center',gap:10,borderBottom:`0.5px solid ${C.bd}`}}>
+      <div style=${{display:'flex',alignItems:'center',gap:8,flexWrap:'wrap',flex:1}}>
+        <span style=${{fontSize:16}}>${ch.icon}</span>
+        <span style=${{fontWeight:600,fontSize:13,color:C.tx}}>${ch.label}</span>
+        <span style=${{color:C.dm,fontSize:11}}>${asset.format||ch.dims}</span>
+        ${asset.campaign_name?html`<span style=${{color:C.ac,fontSize:11}}>📋 ${asset.campaign_name}</span>`:''}
+        <span style=${{background:C.s3,border:`0.5px solid ${C.bd}`,borderRadius:4,padding:'1px 7px',fontSize:10,color:C.mt}}>
+          ${asset.provider||'ai'} · Round ${asset.revision_round||1}
+        </span>
+      </div>
+      <${Badge} status=${asset.status} />
+    </div>
+
+    <div style=${{padding:'14px'}}>
+
+      <!-- Asset preview -->
+      <div style=${{marginBottom:12}}>
+        ${asset.asset_url&&!imgError
+          ?(isVideo
+            ?html`<video src=${asset.asset_url} controls style=${{width:'100%',maxHeight:300,borderRadius:8,background:'#000'}}></video>`
+            :html`<img src=${asset.asset_url} alt="Asset" onError=${()=>setImgError(true)}
+              style=${{width:'100%',maxHeight:320,objectFit:'contain',borderRadius:8,background:C.s2,display:'block'}} />`
+          )
+          :html`<div style=${{background:C.s2,border:`1px dashed ${C.bd}`,borderRadius:8,padding:'40px 20px',textAlign:'center',color:C.mt}}>
+            <div style=${{fontSize:32,marginBottom:8}}>${isVideo?'🎬':'🖼'}</div>
+            <div style=${{fontSize:12}}>${asset.status==='generating'?'AI is generating this asset…':imgError?'Preview unavailable — asset URL may be broken':'No asset yet'}</div>
+            ${asset.status==='generating'?html`<div style=${{width:24,height:24,border:`2px solid ${C.bd}`,borderTop:`2px solid ${C.ac}`,borderRadius:'50%',animation:'spin 0.8s linear infinite',margin:'12px auto 0'}}></div>`:''}
+          </div>`
+        }
+      </div>
+
+      <!-- Prompt used -->
+      ${asset.prompt?html`<div style=${{background:C.s2,borderRadius:6,padding:'8px 10px',fontSize:11,color:C.dm,lineHeight:1.6,marginBottom:10}}>
+        <span style=${{color:C.mt,fontSize:10,textTransform:'uppercase',letterSpacing:'0.5px',display:'block',marginBottom:3}}>AI Prompt</span>
+        ${asset.prompt}
+      </div>`:''}
+
+      <!-- Manual upload override -->
+      <div style=${{marginBottom:10}}>
+        <input ref=${fileRef} type="file" accept=${isVideo?'video/*':'image/*'} onChange=${handleManualUpload} style=${{display:'none'}} />
+        <button onClick=${()=>fileRef.current?.click()} disabled=${uploading}
+          style=${{background:'transparent',border:`0.5px solid ${C.bd}`,borderRadius:6,color:uploading?C.mt:C.dm,padding:'6px 14px',fontSize:12,cursor:uploading?'default':'pointer',width:'100%',textAlign:'center'}}>
+          ${uploading?'⏳ Uploading…':`📁 Upload my own ${isVideo?'video':'image'} (manual override)`}
+        </button>
+      </div>
+
+      <!-- Revision history toggle -->
+      <div style=${{marginBottom:10}}>
+        <button onClick=${toggleHistory} style=${{background:'transparent',border:`0.5px solid ${C.bd}`,borderRadius:6,color:C.dm,padding:'5px 11px',fontSize:11,cursor:'pointer',width:'100%',textAlign:'left',display:'flex',justifyContent:'space-between',alignItems:'center'}}>
+          <span style=${{color:C.or}}>🕑 Version History${historyLoaded?' ('+revisions.length+')':''}</span>
+          <span style=${{color:C.mt,fontSize:10}}>${showHistory?'▲ hide':'▼ show'}</span>
+        </button>
+        ${showHistory&&html`<div style=${{background:C.s1,border:`0.5px solid ${C.bd}`,borderTop:'none',borderRadius:'0 0 6px 6px',padding:'10px 12px'}}>
+          ${!historyLoaded
+            ?html`<${Spinner} msg="Loading history…"/>`
+            :revisions.length===0
+              ?html`<div style=${{color:C.mt,fontSize:12}}>No revisions yet.</div>`
+              :revisions.map((rev,i)=>html`<div key=${i} style=${{borderBottom:i<revisions.length-1?`0.5px solid ${C.bd}`:'none',paddingBottom:8,marginBottom:8}}>
+                <div style=${{display:'flex',justifyContent:'space-between',marginBottom:4}}>
+                  <span style=${{color:C.ac,fontSize:11}}>v${rev.revision_number} · ${rev.source||'ai_generated'} · ${rev.provider||'?'}</span>
+                  <span style=${{color:C.mt,fontSize:10}}>${fmtdt(rev.created_at)}</span>
+                </div>
+                ${rev.feedback?html`<div style=${{color:C.dm,fontSize:11,fontStyle:'italic',marginBottom:4}}>"${rev.feedback}"</div>`:''}
+                ${rev.asset_url?html`<img src=${rev.asset_url} style=${{width:'100%',maxHeight:100,objectFit:'contain',borderRadius:4,background:C.s2,display:'block'}} />`:''}
+              </div>`)
+          }
+        </div>`}
+      </div>
+
+      <!-- Action area -->
+      ${isActionable&&html`<div style=${{borderTop:`0.5px solid ${C.bd}`,paddingTop:12}}>
+        <textarea
+          placeholder="Feedback for revision (required when requesting changes)…"
+          value=${feedback}
+          onInput=${e=>setFeedback(e.target.value)}
+          style=${{background:C.s2,border:`0.5px solid ${C.bd}`,borderRadius:6,color:C.tx,padding:'8px 11px',fontSize:12,width:'100%',resize:'vertical',minHeight:56,outline:'none',marginBottom:10,lineHeight:1.5}}
+        />
+        <div style=${{display:'flex',gap:8,flexWrap:'wrap'}}>
+          <button onClick=${doApprove} style=${{background:C.ok,color:'#0a1a0a',border:'none',borderRadius:6,padding:'8px 18px',fontSize:13,fontWeight:700,cursor:'pointer'}}>
+            ✓ Approve
+          </button>
+          <button onClick=${doRequestRevision} disabled=${regenerating}
+            style=${{background:regenerating?`${C.pu}20`:'transparent',color:C.pu,border:`0.5px solid ${C.pu}`,borderRadius:6,padding:'8px 14px',fontSize:13,cursor:regenerating?'default':'pointer'}}>
+            ${regenerating?'🤖 Regenerating…':'✏ Request AI Revision'}
+          </button>
+          <button onClick=${doReject}
+            style=${{background:'transparent',color:C.er,border:`0.5px solid ${C.er}`,borderRadius:6,padding:'8px 14px',fontSize:13,cursor:'pointer'}}>
+            ✗ Reject
+          </button>
+        </div>
+      </div>`}
+
+      ${isApproved&&html`<div style=${{borderTop:`0.5px solid ${C.bd}`,paddingTop:12}}>
+        <div style=${{color:C.ok,fontSize:11,marginBottom:10}}>✓ Approved ${fmtdt(asset.approved_at)}</div>
+        <button onClick=${doPublish} style=${{background:C.tl,color:'#001a18',border:'none',borderRadius:6,padding:'8px 18px',fontSize:13,fontWeight:700,cursor:'pointer'}}>
+          🚀 Mark as Published
+        </button>
+      </div>`}
+
+      ${asset.status==='published'&&html`<div style=${{color:C.tl,fontSize:11,paddingTop:8,borderTop:`0.5px solid ${C.bd}`}}>🚀 Published ${fmtdt(asset.published_at)}</div>`}
+
+    </div>
   </div>`;
 }
 
-function SpecRow({label,value}){
-  if(!value||(Array.isArray(value)&&value.length===0))return null;
-  const display=Array.isArray(value)?value.join(', '):String(value);
-  return html`<div style=${{marginBottom:7}}>
-    <span style=${{color:C.dm,fontSize:10,textTransform:'uppercase',letterSpacing:'0.5px'}}>${label}</span>
-    <div style=${{color:C.tx,fontSize:12,marginTop:2,lineHeight:1.6}}>${display}</div>
-  </div>`;
-}
-
-// ── CONTENT CARD ─────────────────────────────────────────────
-function ContentCard({item,onUpdate,onDelete,busy}){
+// ── COPY CONTENT CARD (existing, unchanged logic) ────────────
+function CopyContentCard({item,onUpdate,onDelete,busy}){
   const[note,setNote]=useState(item.reviewerNotes||'');
   const[selVar,setSelVar]=useState(item.selectedVariation||0);
   const[copied,setCopied]=useState(false);
@@ -132,17 +334,11 @@ function ContentCard({item,onUpdate,onDelete,busy}){
   const isActionable=['pending_review','revision_requested'].includes(item.status);
   const isApproved=item.status==='approved';
   const SOURCE_STYLE={human_edit:{c:C.ac,l:'Human Edit'},claude_regeneration:{c:C.pu,l:'AI Regen'},original:{c:C.dm,l:'Original'},restored:{c:C.tl,l:'Restored'}};
-
-  const borderColor=item.status==='pending_review'?C.bdB
-    :item.status==='approved'?C.ok+'50'
-    :item.status==='revision_requested'?C.pu+'50'
-    :C.bd;
+  const borderColor=item.status==='pending_review'?C.bdB:item.status==='approved'?C.ok+'50':item.status==='revision_requested'?C.pu+'50':C.bd;
 
   async function loadRevisions(){const r=await db.getRevisions(item.id);setRevisions(r);setRevisionsLoaded(true);}
   async function toggleHistory(){const next=!showHistory;setShowHistory(next);if(next&&!revisionsLoaded)await loadRevisions();}
-
   async function selectVar(i){setSelVar(i);await onUpdate({...item,selectedVariation:i,updatedAt:now()});}
-
   function startEdit(){setEditText(vars[selVar]||'');setEditing(true);}
   function cancelEdit(){setEditing(false);}
 
@@ -173,14 +369,13 @@ function ContentCard({item,onUpdate,onDelete,busy}){
     if(!note.trim()){alert('Add revision notes — Claude will use these to regenerate the copy.');return;}
     setRegenerating(true);
     await onUpdate({...item,status:'revision_requested',reviewerNotes:note,updatedAt:now()});
-    const N8N_PROXY='https://n8n-y8wq-production.up.railway.app/webhook/claude-proxy';
     const sys=`You are an expert marketing copywriter for ${item.clientName||'the brand'}. You are revising existing marketing copy based on reviewer feedback.`;
     const usr=`Revise the following ${item.formatLabel||item.formatId} copy based on the revision notes below.\n\nOriginal brief: ${item.brief||'Not specified'}\nLanguage: ${item.language||'English'}\nTone: ${item.tone||'Use brand voice'}\n\nCurrent copy:\n${vars[selVar]||''}\n\nRevision notes from reviewer: ${note}\n\nWrite ONLY the revised copy. No preamble, no explanation, no labels. Output the copy directly.`;
     try{
-      const res=await fetch(N8N_PROXY,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({system:sys,prompt:usr})});
+      const res=await fetch(`${N8N}/webhook/claude-proxy`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({system:sys,prompt:usr})});
       const rawText=await res.text();
-      if(!rawText||rawText.trim()===''){throw new Error('n8n returned an empty response — wait a few seconds and try again');}
-      let data;try{data=JSON.parse(rawText);}catch{throw new Error('Invalid response from n8n: '+rawText.slice(0,120));}
+      if(!rawText||rawText.trim()===''){throw new Error('n8n returned empty response');}
+      let data;try{data=JSON.parse(rawText);}catch{throw new Error('Invalid response: '+rawText.slice(0,120));}
       const newText=(data?.content?.[0]?.text||data?.[0]?.content?.[0]?.text||data?.body?.content?.[0]?.text||'').trim();
       if(newText){
         const newVars=[...vars];newVars[selVar]=newText;
@@ -191,7 +386,7 @@ function ContentCard({item,onUpdate,onDelete,busy}){
         const r=await db.getRevisions(item.id);setRevisions(r);setRevisionsLoaded(true);
         setNote('');
       }else{alert('Claude returned empty response. Notes saved — try again.');}
-    }catch(e){alert('Regeneration failed: '+e.message+'\nRevision notes have been saved.');}
+    }catch(e){alert('Regeneration failed: '+e.message);}
     setRegenerating(false);
   }
   async function doReject(){await onUpdate({...item,status:'rejected',reviewerNotes:note||null,updatedAt:now()});}
@@ -199,40 +394,33 @@ function ContentCard({item,onUpdate,onDelete,busy}){
   async function copyText(){try{await navigator.clipboard.writeText(vars[selVar]||'');setCopied(true);setTimeout(()=>setCopied(false),2000);}catch{window.prompt('Copy this text:',vars[selVar]||'');}}
 
   return html`<div style=${{background:C.s1,border:`0.5px solid ${borderColor}`,borderRadius:10,marginBottom:12,overflow:'hidden',animation:'fadeIn 0.2s ease'}}>
-
-    <!-- Header -->
     <div style=${{padding:'13px 16px',display:'flex',justifyContent:'space-between',alignItems:'flex-start',gap:12,borderBottom:`0.5px solid ${C.bd}`}}>
       <div style=${{flex:1,minWidth:0}}>
         <div style=${{display:'flex',alignItems:'center',gap:7,flexWrap:'wrap',marginBottom:4}}>
           <span style=${{fontSize:15}}>${fmt.icon}</span>
           <span style=${{fontWeight:600,fontSize:14,color:C.tx}}>${item.clientName||'Unknown Client'}</span>
           <span style=${{color:C.dm,fontSize:12}}>${fmt.label}</span>
-          ${item.platform&&item.platform!=='multi'?html`<span style=${{background:C.s3,border:`0.5px solid ${C.bd}`,borderRadius:4,padding:'1px 7px',fontSize:11,color:C.dm}}>${item.platform}</span>`:''}
           ${item.campaignName?html`<span style=${{color:C.ac,fontSize:11}}>📋 ${item.campaignName}</span>`:''}
         </div>
-        <div style=${{color:C.mt,fontSize:11}}>Submitted ${fmtdt(item.createdAt)} · ${vars.length} variation${vars.length!==1?'s':''} · ${item.language||'English'}</div>
+        <div style=${{color:C.mt,fontSize:11}}>Submitted ${fmtdt(item.createdAt)} · ${vars.length} variation${vars.length!==1?'s':''}</div>
       </div>
       <div style=${{display:'flex',flexDirection:'column',alignItems:'flex-end',gap:6,flexShrink:0}}>
         <${Badge} status=${item.status} />
-        <button onClick=${()=>onDelete(item.id)} style=${{background:'transparent',border:'none',color:C.mt,cursor:'pointer',fontSize:12,padding:'1px 4px',lineHeight:1}} title="Delete item">✕</button>
+        <button onClick=${()=>onDelete(item.id)} style=${{background:'transparent',border:'none',color:C.mt,cursor:'pointer',fontSize:12,padding:'1px 4px'}} title="Delete">✕</button>
       </div>
     </div>
 
-    <!-- Brief strip -->
     ${item.brief?html`<div style=${{padding:'8px 16px',background:C.s2+'60',borderBottom:`0.5px solid ${C.bd}`,fontSize:12,color:C.dm,lineHeight:1.5}}>
       <span style=${{color:C.mt,fontSize:10,textTransform:'uppercase',letterSpacing:'0.5px',marginRight:6}}>Brief</span>${item.brief}
     </div>`:''}
 
     <div style=${{padding:'14px 16px'}}>
-
-      <!-- Variation tabs -->
       ${vars.length>1?html`<div style=${{display:'flex',gap:6,flexWrap:'wrap',marginBottom:10}}>
         ${vars.map((v,i)=>html`<button key=${i} onClick=${()=>selectVar(i)} style=${{background:selVar===i?C.ac:C.s3,color:selVar===i?'#fff':C.dm,border:`0.5px solid ${selVar===i?C.ac:C.bd}`,borderRadius:5,padding:'4px 11px',fontSize:11,cursor:'pointer'}}>
           Var ${varLabel(i)}${selVar===i?' ✓':''}
         </button>`)}
       </div>`:''}
 
-      <!-- Copy text / inline edit -->
       ${editing
         ?html`<div>
           <textarea value=${editText} onInput=${e=>setEditText(e.target.value)} autoFocus
@@ -253,7 +441,6 @@ function ContentCard({item,onUpdate,onDelete,busy}){
         </div>`
       }
 
-      <!-- Revision history -->
       <div style=${{marginTop:8}}>
         <button onClick=${toggleHistory} style=${{background:'transparent',border:`0.5px solid ${C.bd}`,borderRadius:6,color:C.dm,padding:'5px 11px',fontSize:11,cursor:'pointer',width:'100%',textAlign:'left',display:'flex',justifyContent:'space-between',alignItems:'center'}}>
           <span style=${{color:C.or}}>🕑 Revision History${revisionsLoaded?' ('+revisions.length+')':''}</span>
@@ -263,7 +450,7 @@ function ContentCard({item,onUpdate,onDelete,busy}){
           ${!revisionsLoaded
             ?html`<div style=${{color:C.dm,fontSize:12,padding:'8px 0'}}>Loading…</div>`
             :revisions.length===0
-              ?html`<div style=${{color:C.mt,fontSize:12,padding:'8px 0'}}>No edits logged yet. Use "Edit copy" above to start tracking revisions.</div>`
+              ?html`<div style=${{color:C.mt,fontSize:12,padding:'8px 0'}}>No edits logged yet.</div>`
               :revisions.map((rev,i)=>{
                   const src=SOURCE_STYLE[rev.source]||{c:C.dm,l:rev.source||'Edit'};
                   return html`<div key=${i} style=${{borderBottom:i<revisions.length-1?`0.5px solid ${C.bd}`:'none',paddingBottom:10,marginBottom:10}}>
@@ -285,131 +472,96 @@ function ContentCard({item,onUpdate,onDelete,busy}){
         </div>`}
       </div>
 
-      <!-- Specs -->
-      <${Collapsible} title="🎨 Image Spec (Canva — pending)" color=${C.pu}>
-        <${SpecRow} label="Platform" value=${item.imageSpec?.platform} />
-        <${SpecRow} label="Dimensions" value=${item.imageSpec?.dimensions} />
-        <${SpecRow} label="Brand Colors" value=${item.imageSpec?.colorPalette} />
-        <${SpecRow} label="Suggested Headline" value=${item.imageSpec?.suggestedHeadline} />
-        <${SpecRow} label="Visual Brief" value=${item.imageSpec?.visualBrief} />
-        ${item.imageSpec?.notes?html`<div style=${{color:C.mt,fontSize:11,marginTop:6,borderTop:`0.5px solid ${C.bd}`,paddingTop:6}}>${item.imageSpec.notes}</div>`:''}
-      </${Collapsible}>
-
-      <${Collapsible} title="🎬 Video Spec (HeyGen — pending)" color=${C.tl}>
-        <${SpecRow} label="Duration" value=${item.videoSpec?.duration} />
-        <${SpecRow} label="Style" value=${item.videoSpec?.style} />
-        <div style=${{marginBottom:7}}>
-          <span style=${{color:C.dm,fontSize:10,textTransform:'uppercase',letterSpacing:'0.5px'}}>Script</span>
-          <div style=${{color:C.tx,fontSize:12,marginTop:4,lineHeight:1.6,background:C.s2,borderRadius:6,padding:'8px 10px',whiteSpace:'pre-wrap',maxHeight:120,overflowY:'auto'}}>${item.videoSpec?.script||'—'}</div>
-        </div>
-        ${item.videoSpec?.notes?html`<div style=${{color:C.mt,fontSize:11,borderTop:`0.5px solid ${C.bd}`,paddingTop:6}}>${item.videoSpec.notes}</div>`:''}
-      </${Collapsible}>
-
-      <!-- Status banners -->
-      ${item.status==='revision_requested'&&item.reviewerNotes?html`<div style=${{background:'rgba(167,139,250,0.08)',border:`0.5px solid ${C.pu}40`,borderRadius:6,padding:'10px 12px',marginTop:12,fontSize:12,color:C.pu}}>
-        <div style=${{fontSize:10,textTransform:'uppercase',letterSpacing:'0.5px',marginBottom:4}}>Revision Notes</div>
-        ${item.reviewerNotes}
-      </div>`:''}
-      ${item.status==='rejected'&&item.reviewerNotes?html`<div style=${{background:'rgba(248,113,113,0.08)',border:`0.5px solid ${C.er}40`,borderRadius:6,padding:'10px 12px',marginTop:12,fontSize:12,color:C.er}}>
-        <div style=${{fontSize:10,textTransform:'uppercase',letterSpacing:'0.5px',marginBottom:4}}>Rejection Reason</div>
-        ${item.reviewerNotes}
-      </div>`:''}
-      ${item.status==='approved'?html`<div style=${{color:C.ok,fontSize:11,marginTop:10}}>✓ Approved ${fmtdt(item.approvedAt)}</div>`:''}
-      ${item.status==='published'?html`<div style=${{color:C.tl,fontSize:11,marginTop:10}}>🚀 Published ${fmtdt(item.publishedAt)}</div>`:''}
-
-      <!-- Action area -->
       ${isActionable?html`<div style=${{marginTop:14,paddingTop:14,borderTop:`0.5px solid ${C.bd}`}}>
-        <textarea
-          placeholder="Notes for revision or rejection (required for revision requests)…"
-          value=${note}
-          onInput=${e=>setNote(e.target.value)}
-          style=${{background:C.s2,border:`0.5px solid ${C.bd}`,borderRadius:6,color:C.tx,padding:'8px 11px',fontSize:12,width:'100%',resize:'vertical',minHeight:64,outline:'none',marginBottom:10,lineHeight:1.5}}
-        />
+        <textarea placeholder="Revision notes (required for revision requests)…" value=${note} onInput=${e=>setNote(e.target.value)}
+          style=${{background:C.s2,border:`0.5px solid ${C.bd}`,borderRadius:6,color:C.tx,padding:'8px 11px',fontSize:12,width:'100%',resize:'vertical',minHeight:64,outline:'none',marginBottom:10,lineHeight:1.5}}/>
         <div style=${{display:'flex',gap:8,flexWrap:'wrap'}}>
-          <button onClick=${doApprove} disabled=${busy} style=${{background:C.ok,color:'#0a1a0a',border:'none',borderRadius:6,padding:'8px 20px',fontSize:13,fontWeight:700,cursor:busy?'default':'pointer',opacity:busy?0.6:1}}>
-            ✓ Approve
-          </button>
+          <button onClick=${doApprove} disabled=${busy} style=${{background:C.ok,color:'#0a1a0a',border:'none',borderRadius:6,padding:'8px 20px',fontSize:13,fontWeight:700,cursor:busy?'default':'pointer',opacity:busy?0.6:1}}>✓ Approve</button>
           <button onClick=${doRevision} disabled=${busy||regenerating} style=${{background:regenerating?`${C.pu}20`:'transparent',color:C.pu,border:`0.5px solid ${C.pu}`,borderRadius:6,padding:'8px 15px',fontSize:13,cursor:(busy||regenerating)?'default':'pointer',opacity:(busy||regenerating)?0.8:1}}>
-            ${regenerating?'🤖 Claude is rewriting…':'✏ Request Revision'}
+            ${regenerating?'🤖 Rewriting…':'✏ Request Revision'}
           </button>
-          <button onClick=${doReject} disabled=${busy} style=${{background:'transparent',color:C.er,border:`0.5px solid ${C.er}`,borderRadius:6,padding:'8px 15px',fontSize:13,cursor:busy?'default':'pointer',opacity:busy?0.6:1}}>
-            ✗ Reject
-          </button>
+          <button onClick=${doReject} disabled=${busy} style=${{background:'transparent',color:C.er,border:`0.5px solid ${C.er}`,borderRadius:6,padding:'8px 15px',fontSize:13,cursor:busy?'default':'pointer',opacity:busy?0.6:1}}>✗ Reject</button>
         </div>
       </div>`:''}
 
       ${isApproved?html`<div style=${{marginTop:14,paddingTop:14,borderTop:`0.5px solid ${C.bd}`}}>
-        <button onClick=${doPublish} disabled=${busy} style=${{background:C.tl,color:'#001a18',border:'none',borderRadius:6,padding:'8px 20px',fontSize:13,fontWeight:700,cursor:busy?'default':'pointer',opacity:busy?0.6:1}}>
-          🚀 Mark as Published
-        </button>
+        <button onClick=${doPublish} disabled=${busy} style=${{background:C.tl,color:'#001a18',border:'none',borderRadius:6,padding:'8px 20px',fontSize:13,fontWeight:700,cursor:busy?'default':'pointer',opacity:busy?0.6:1}}>🚀 Mark as Published</button>
       </div>`:''}
-
+      ${item.status==='published'?html`<div style=${{color:C.tl,fontSize:11,marginTop:10}}>🚀 Published ${fmtdt(item.publishedAt)}</div>`:''}
     </div>
   </div>`;
 }
 
-// ── APP ──────────────────────────────────────────────────────
+// ── MAIN APP ─────────────────────────────────────────────────
 function App(){
-  const[items,setItems]=useState([]);
+  const[activeTab,setActiveTab]=useState('copy');
+  const[copyItems,setCopyItems]=useState([]);
+  const[mediaAssets,setMediaAssets]=useState([]);
   const[clients,setClients]=useState([]);
   const[loading,setLoading]=useState(true);
   const[busy,setBusy]=useState({});
   const[filterStatus,setFilterStatus]=useState('pending_review');
   const[filterClient,setFilterClient]=useState('all');
-  const[filterPlatform,setFilterPlatform]=useState('all');
   const[lastRefresh,setLastRefresh]=useState(null);
 
   const loadData=useCallback(async(silent=false)=>{
     if(!silent)setLoading(true);
-    const[q,c]=await Promise.all([db.getQueue(),db.getClients()]);
-    setItems(q);setClients(c);setLastRefresh(new Date());
+    const[q,c,m]=await Promise.all([db.getQueue(),db.getClients(),db.getMediaAssets()]);
+    setCopyItems(q);setClients(c);setMediaAssets(m);
+    setLastRefresh(new Date());
     if(!silent)setLoading(false);
   },[]);
 
   useEffect(()=>{loadData();},[loadData]);
   useEffect(()=>{const t=setInterval(()=>loadData(true),60000);return()=>clearInterval(t);},[loadData]);
 
-  async function handleUpdate(item){
+  async function handleCopyUpdate(item){
     setBusy(p=>({...p,[item.id]:true}));
     await db.updateItem(item);
-    setItems(prev=>prev.map(i=>i.id===item.id?item:i));
+    setCopyItems(prev=>prev.map(i=>i.id===item.id?item:i));
     setBusy(p=>({...p,[item.id]:false}));
   }
-  async function handleDelete(id){
+  async function handleCopyDelete(id){
     if(!confirm('Remove this item from the queue?'))return;
     await db.deleteItem(id);
-    setItems(prev=>prev.filter(i=>i.id!==id));
+    setCopyItems(prev=>prev.filter(i=>i.id!==id));
+  }
+  async function handleAssetUpdate(asset){
+    await db.updateAsset(asset);
+    setMediaAssets(prev=>prev.map(a=>a.id===asset.id?asset:a));
   }
 
   // Stats
-  const counts={all:items.length};
-  Object.keys(STATUS).forEach(s=>{counts[s]=items.filter(i=>i.status===s).length;});
+  const copyCounts={all:copyItems.length};
+  Object.keys(STATUS).forEach(s=>{copyCounts[s]=copyItems.filter(i=>i.status===s).length;});
+  const mediaCounts={all:mediaAssets.length};
+  Object.keys(STATUS).forEach(s=>{mediaCounts[s]=mediaAssets.filter(a=>a.status===s).length;});
 
-  // Unique platforms for filter
-  const platforms=[...new Set(items.map(i=>i.platform||'multi'))].filter(Boolean);
-
-  // Filtered list
-  const filtered=items.filter(item=>{
+  const filteredCopy=copyItems.filter(item=>{
     if(filterStatus!=='all'&&item.status!==filterStatus)return false;
     if(filterClient!=='all'&&item.clientId!==filterClient)return false;
-    if(filterPlatform!=='all'&&(item.platform||'multi')!==filterPlatform)return false;
+    return true;
+  });
+  const filteredMedia=mediaAssets.filter(asset=>{
+    if(filterStatus!=='all'&&asset.status!==filterStatus)return false;
+    if(filterClient!=='all'&&asset.client_id!==filterClient)return false;
     return true;
   });
 
+  const counts=activeTab==='copy'?copyCounts:mediaCounts;
   const statusTabs=[
-    {k:'all',l:'All'},
-    {k:'pending_review',l:'Pending'},
-    {k:'revision_requested',l:'Revision Needed'},
-    {k:'approved',l:'Approved'},
-    {k:'rejected',l:'Rejected'},
-    {k:'published',l:'Published'},
+    {k:'all',l:'All'},{k:'pending_review',l:'Pending'},{k:'revision_requested',l:'Revision Needed'},
+    {k:'approved',l:'Approved'},{k:'rejected',l:'Rejected'},{k:'published',l:'Published'},
   ];
+
+  const pendingCopy=copyCounts['pending_review']||0;
+  const pendingMedia=mediaCounts['pending_review']||0;
 
   return html`<div style=${{minHeight:'100vh',background:C.bg}}>
 
     <!-- Header -->
     <div style=${{background:C.s1,borderBottom:`0.5px solid ${C.bd}`,padding:'0 20px',position:'sticky',top:0,zIndex:100}}>
-      <div style=${{maxWidth:960,margin:'0 auto',display:'flex',justifyContent:'space-between',alignItems:'center',height:52}}>
+      <div style=${{maxWidth:1100,margin:'0 auto',display:'flex',justifyContent:'space-between',alignItems:'center',height:52}}>
         <div style=${{display:'flex',alignItems:'center',gap:10}}>
           <span style=${{fontSize:17,fontWeight:700,color:C.tx,letterSpacing:'-0.3px'}}>OmniraAI</span>
           <span style=${{color:C.bd}}>·</span>
@@ -424,53 +576,66 @@ function App(){
       </div>
     </div>
 
-    <div style=${{maxWidth:960,margin:'0 auto',padding:'20px'}}>
+    <div style=${{maxWidth:1100,margin:'0 auto',padding:'20px'}}>
+
+      <!-- Tab switcher -->
+      <div style=${{display:'flex',gap:8,marginBottom:20}}>
+        <button onClick=${()=>setActiveTab('copy')} style=${{background:activeTab==='copy'?C.ac:C.s1,color:activeTab==='copy'?'#fff':C.dm,border:`0.5px solid ${activeTab==='copy'?C.ac:C.bd}`,borderRadius:8,padding:'9px 20px',fontSize:14,fontWeight:600,cursor:'pointer',position:'relative'}}>
+          📝 Copy
+          ${pendingCopy>0?html`<span style=${{position:'absolute',top:-6,right:-6,background:C.wn,color:'#0a0a00',borderRadius:10,padding:'1px 6px',fontSize:10,fontWeight:700}}>${pendingCopy}</span>`:''}
+        </button>
+        <button onClick=${()=>setActiveTab('media')} style=${{background:activeTab==='media'?C.pu:C.s1,color:activeTab==='media'?'#fff':C.dm,border:`0.5px solid ${activeTab==='media'?C.pu:C.bd}`,borderRadius:8,padding:'9px 20px',fontSize:14,fontWeight:600,cursor:'pointer',position:'relative'}}>
+          🖼 Media Assets
+          ${pendingMedia>0?html`<span style=${{position:'absolute',top:-6,right:-6,background:C.wn,color:'#0a0a00',borderRadius:10,padding:'1px 6px',fontSize:10,fontWeight:700}}>${pendingMedia}</span>`:''}
+        </button>
+      </div>
 
       <!-- Stats row -->
       <div style=${{display:'flex',gap:10,marginBottom:20,flexWrap:'wrap'}}>
-        ${Object.entries(STATUS).map(([k,cfg])=>html`<div key=${k} style=${{background:C.s1,border:`0.5px solid ${counts[k]>0?cfg.c+'50':C.bd}`,borderRadius:8,padding:'10px 16px',textAlign:'center',minWidth:110,flex:1}}>
-          <div style=${{fontSize:24,fontWeight:700,color:counts[k]>0?cfg.c:C.mt}}>${counts[k]||0}</div>
+        ${Object.entries(STATUS).map(([k,cfg])=>html`<div key=${k} style=${{background:C.s1,border:`0.5px solid ${counts[k]>0?cfg.c+'50':C.bd}`,borderRadius:8,padding:'10px 16px',textAlign:'center',minWidth:100,flex:1}}>
+          <div style=${{fontSize:22,fontWeight:700,color:counts[k]>0?cfg.c:C.mt}}>${counts[k]||0}</div>
           <div style=${{fontSize:10,color:C.dm,textTransform:'uppercase',letterSpacing:'0.5px',marginTop:2,lineHeight:1.3}}>${cfg.l}</div>
         </div>`)}
       </div>
 
       <!-- Filters -->
       <div style=${{background:C.s1,border:`0.5px solid ${C.bd}`,borderRadius:10,padding:'14px 16px',marginBottom:20}}>
-        <div style=${{display:'flex',gap:6,flexWrap:'wrap',marginBottom:12}}>
-          ${statusTabs.map(({k,l})=>html`<button key=${k} onClick=${()=>setFilterStatus(k)} style=${{background:filterStatus===k?C.ac:C.s3,color:filterStatus===k?'#fff':C.dm,border:`0.5px solid ${filterStatus===k?C.ac:C.bd}`,borderRadius:6,padding:'5px 13px',fontSize:12,cursor:'pointer'}}>
+        <div style=${{display:'flex',gap:6,flexWrap:'wrap',marginBottom:10}}>
+          ${statusTabs.map(({k,l})=>html`<button key=${k} onClick=${()=>setFilterStatus(k)}
+            style=${{background:filterStatus===k?(activeTab==='copy'?C.ac:C.pu):C.s3,color:filterStatus===k?'#fff':C.dm,border:`0.5px solid ${filterStatus===k?(activeTab==='copy'?C.ac:C.pu):C.bd}`,borderRadius:6,padding:'5px 13px',fontSize:12,cursor:'pointer'}}>
             ${l} (${counts[k]||0})
           </button>`)}
         </div>
-        <div style=${{display:'flex',gap:10,flexWrap:'wrap'}}>
-          <select value=${filterClient} onChange=${e=>setFilterClient(e.target.value)} style=${{background:C.s2,border:`0.5px solid ${C.bd}`,borderRadius:6,color:C.tx,padding:'6px 10px',fontSize:12,flex:1,minWidth:160,outline:'none'}}>
-            <option value="all">All Clients (${items.length})</option>
-            ${clients.map(c=>html`<option key=${c.id} value=${c.id}>${c.basics?.brandName||c.basics?.clientName||c.id}</option>`)}
-          </select>
-          <select value=${filterPlatform} onChange=${e=>setFilterPlatform(e.target.value)} style=${{background:C.s2,border:`0.5px solid ${C.bd}`,borderRadius:6,color:C.tx,padding:'6px 10px',fontSize:12,flex:1,minWidth:140,outline:'none'}}>
-            <option value="all">All Platforms</option>
-            ${platforms.map(p=>html`<option key=${p} value=${p}>${p}</option>`)}
-          </select>
-        </div>
+        <select value=${filterClient} onChange=${e=>setFilterClient(e.target.value)}
+          style=${{background:C.s2,border:`0.5px solid ${C.bd}`,borderRadius:6,color:C.tx,padding:'6px 10px',fontSize:12,minWidth:180,outline:'none'}}>
+          <option value="all">All Clients</option>
+          ${clients.map(c=>html`<option key=${c.id} value=${c.id}>${c.basics?.brandName||c.basics?.clientName||c.id}</option>`)}
+        </select>
       </div>
 
-      <!-- Queue list -->
+      <!-- Content -->
       ${loading
         ?html`<${Spinner}/>`
-        :filtered.length===0
-          ?html`<div style=${{textAlign:'center',padding:'80px 20px',color:C.mt}}>
-            <div style=${{fontSize:32,marginBottom:12}}>${items.length===0?'📭':'🔍'}</div>
-            <div style=${{fontSize:14,marginBottom:6}}>${items.length===0?'Queue is empty':'No items match the current filters'}</div>
-            <div style=${{fontSize:12,color:C.bd}}>${items.length===0?'Trigger the n8n webhook to generate content and add it to the queue.':'Try changing the status tab or clearing the client/platform filter.'}</div>
-          </div>`
-          :filtered.map(item=>html`<${ContentCard}
-            key=${item.id}
-            item=${item}
-            onUpdate=${handleUpdate}
-            onDelete=${handleDelete}
-            busy=${!!busy[item.id]}
-          />`)
+        :activeTab==='copy'
+          ?(filteredCopy.length===0
+            ?html`<div style=${{textAlign:'center',padding:'80px 20px',color:C.mt}}>
+              <div style=${{fontSize:32,marginBottom:12}}>${copyItems.length===0?'📭':'🔍'}</div>
+              <div style=${{fontSize:14}}>${copyItems.length===0?'Copy queue is empty':'No copy matches current filters'}</div>
+            </div>`
+            :filteredCopy.map(item=>html`<${CopyContentCard} key=${item.id} item=${item} onUpdate=${handleCopyUpdate} onDelete=${handleCopyDelete} busy=${!!busy[item.id]} />`))
+          :(filteredMedia.length===0
+            ?html`<div style=${{textAlign:'center',padding:'80px 20px',color:C.mt}}>
+              <div style=${{fontSize:32,marginBottom:12}}>${mediaAssets.length===0?'🖼':'🔍'}</div>
+              <div style=${{fontSize:14,marginBottom:8}}>${mediaAssets.length===0?'No media assets yet':'No assets match current filters'}</div>
+              ${mediaAssets.length===0?html`<div style=${{fontSize:12,color:C.bd,maxWidth:400,margin:'0 auto',lineHeight:1.6}}>
+                Media assets will appear here once a campaign brief triggers the AI generation pipeline.<br/>
+                Add your Fal.ai API key in Supabase settings to enable automatic generation.
+              </div>`:''}
+            </div>`
+            :html`<div style=${{display:'grid',gridTemplateColumns:'repeat(auto-fill,minmax(340px,1fr))',gap:16}}>
+              ${filteredMedia.map(asset=>html`<${MediaAssetCard} key=${asset.id} asset=${asset} onUpdate=${handleAssetUpdate} />`)}
+            </div>`)
       }
-
     </div>
   </div>`;
 }
