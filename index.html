@@ -317,9 +317,13 @@ function MediaAssetCard({asset,onUpdate,weekInfo}){
 
   return html`<div style=${{background:C.s1,border:`0.5px solid ${borderColor}`,borderRadius:10,marginBottom:12,overflow:'hidden',animation:'fadeIn 0.2s ease'}}>
 
-    ${weekInfo&&html`<div style=${{background:'rgba(74,134,245,0.07)',borderBottom:`0.5px solid rgba(74,134,245,0.18)`,padding:'7px 14px',display:'flex',alignItems:'center',justifyContent:'space-between'}}>
-      <span style=${{color:C.ac,fontWeight:700,fontSize:12,letterSpacing:'0.2px'}}>📅 WEEK ${weekInfo.week_number}</span>
-      <span style=${{color:weekInfo.ca_status==='approved'?C.ok:weekInfo.ca_status==='published'?C.tl:C.dm,fontSize:11}}>
+    ${weekInfo&&html`<div style=${{background:'rgba(45,212,191,0.06)',borderBottom:`0.5px solid rgba(45,212,191,0.15)`,padding:'7px 14px',display:'flex',alignItems:'center',justifyContent:'space-between',flexWrap:'wrap',gap:4}}>
+      <div style=${{display:'flex',alignItems:'center',gap:8}}>
+        <span style=${{background:'rgba(45,212,191,0.12)',color:'#2dd4bf',border:'0.5px solid rgba(45,212,191,0.3)',borderRadius:8,padding:'2px 8px',fontSize:10,fontWeight:700}}>🏓 Real Gains w/ Titan</span>
+        <span style=${{color:'#5a8ab0',fontSize:10}}>📸 IG · 📘 FB</span>
+        <span style=${{color:'#2dd4bf',fontWeight:800,fontSize:12}}>Wk ${weekInfo.week_number}</span>
+      </div>
+      <span style=${{color:weekInfo.ca_status==='approved'?'#34d399':weekInfo.ca_status==='published'?'#2dd4bf':'#5a8ab0',fontSize:11}}>
         ${weekInfo.ca_status==='approved'?'✓ Approved · ':weekInfo.ca_status==='published'?'🚀 Published · ':'⏳ Pending · '}Fri ${new Date(weekInfo.scheduled_for).toLocaleDateString('en-MY',{day:'numeric',month:'short',year:'numeric'})}
       </span>
     </div>`}
@@ -672,114 +676,125 @@ function CopyContentCard({item,onUpdate,onDelete,busy}){
 
 // ── DEPLOYMENT TAB ────────────────────────────────────────────
 function DeploymentTab({deployments}){
+  const[campFilter,setCampFilter]=useState('all');
   const{approvals,assets}=deployments;
   const now=new Date();
-  const fmtDate=d=>d?new Date(d).toLocaleDateString('en-MY',{day:'numeric',month:'short',year:'numeric',hour:'2-digit',minute:'2-digit'}):'—';
-  const fmtDateShort=d=>d?new Date(d).toLocaleDateString('en-MY',{day:'numeric',month:'short'}):'—';
-  const CT_ICON={email:'📧',social:'📸',real_gains:'🏓'};
-  const CT_LABEL={email:'Email Blast',social:'Social Post',real_gains:'Real Gains'};
-  const CH_ICON={ig_post:'📸','instagram,facebook':'📸📘',fb_post:'📘',email:'📧',wa_poster:'💬'};
+  const fmtShort=d=>d?new Date(d).toLocaleDateString('en-MY',{day:'numeric',month:'short'}):'—';
 
-  // Build unified deployment rows from content_approvals
-  const caRows=approvals.map(ca=>{
-    const isPublished=ca.status==='published';
-    const isApproved=ca.status==='approved';
-    const isSkipped=ca.status==='skipped';
+  // Build unified rows from content_approvals
+  const allRows=approvals.map(ca=>{
+    const m=CAMPAIGN_META[ca.content_type]||{icon:'📄',label:ca.content_type,campaign:ca.content_type,channel:'',color:'#5a8ab0'};
+    const linkedAsset=assets.find(a=>a.id===ca.full_content?.asset_id);
     const schDate=ca.scheduled_for?new Date(ca.scheduled_for):null;
     const isPast=schDate&&schDate<now;
-    const daysUntil=schDate?Math.ceil((schDate-now)/(86400000)):null;
-    // Find linked campaign_asset for this approval
-    const linkedAsset=assets.find(a=>a.id===ca.full_content?.asset_id);
-    const campaignName=linkedAsset?.campaign_name||{email:'Titan Drill Series',social:'Titan Social',real_gains:'Real Gains with Titan'}[ca.content_type]||'Titan';
-    const postId=linkedAsset?.platform_post_id||null;
-    const deployErr=linkedAsset?.deployment_error||null;
-    return{id:ca.id,type:'content_approval',content_type:ca.content_type,week_number:ca.week_number,
-      subject:ca.subject,campaign:campaignName,channel:ca.content_type==='email'?'email':linkedAsset?.channel||'instagram,facebook',
+    const daysUntil=schDate?Math.ceil((schDate-now)/86400000):null;
+    const isPublished=ca.status==='published';
+    const isSkipped=ca.status==='skipped';
+    const isApproved=ca.status==='approved';
+    // Clean title from new naming convention
+    const title=(ca.subject||'').replace(/^(TDOW (Email|Social) Wk\d+:|Real Gains Wk\d+:)\s*/i,'').replace(/^[🏓📧📸]+\s*/,'');
+    return{
+      id:ca.id,content_type:ca.content_type,week_number:ca.week_number,title,
+      meta:m,channel:m.channel,campaign:m.campaign,
       scheduled_for:ca.scheduled_for,approved_at:ca.approved_at,
-      status:isPublished?'published':isSkipped?'skipped':isApproved?'approved':'approved',
-      platform_post_id:postId,deployment_error:deployErr,isPast,daysUntil};
-  });
+      status:isPublished?'published':isSkipped?'skipped':isApproved?'approved':'pending',
+      platform_post_id:linkedAsset?.platform_post_id||null,
+      deployment_error:linkedAsset?.deployment_error||null,
+      isPast,daysUntil
+    };
+  }).sort((a,b)=>new Date(a.scheduled_for)-new Date(b.scheduled_for));
 
-  // Separate campaign_assets not linked via content_approvals (standalone assets)
+  const filtered=campFilter==='all'?allRows:allRows.filter(r=>r.content_type===campFilter);
+
+  const publishedCount=allRows.filter(r=>r.status==='published').length;
+  const scheduledCount=allRows.filter(r=>r.status==='approved').length;
+  const failedCount=allRows.filter(r=>r.deployment_error).length;
+
   const caIds=new Set(approvals.map(ca=>ca.full_content?.asset_id).filter(Boolean));
   const standaloneAssets=assets.filter(a=>!caIds.has(a.id)&&a.status==='published');
 
-  const publishedCount=caRows.filter(r=>r.status==='published').length;
-  const scheduledCount=caRows.filter(r=>r.status==='approved').length;
-  const failedCount=caRows.filter(r=>r.deployment_error).length;
-
-  const StatusCell=({row})=>{
+  function StatusCell({row}){
     if(row.deployment_error)return html`<div>
-      <span style=${{color:'#f87171',fontWeight:700,fontSize:12}}>❌ Failed</span>
-      <div style=${{color:'#f87171',fontSize:10,marginTop:2,maxWidth:200,wordBreak:'break-word'}}>${row.deployment_error}</div>
+      <span style=${{color:'#f87171',fontWeight:700,fontSize:11}}>❌ Failed</span>
+      <div style=${{color:'#f87171',fontSize:10,marginTop:2,maxWidth:180,wordBreak:'break-word'}}>${row.deployment_error}</div>
     </div>`;
-    if(row.status==='published')return html`<span style=${{color:'#34d399',fontWeight:700,fontSize:12}}>✓ Published</span>`;
-    if(row.status==='skipped')return html`<span style=${{color:'#5a8ab0',fontSize:12}}>⏭ Skipped</span>`;
-    if(row.isPast)return html`<span style=${{color:'#f87171',fontSize:12}}>⚠ Overdue</span>`;
-    if(row.daysUntil!==null&&row.daysUntil<=1)return html`<span style=${{color:'#fbbf24',fontWeight:700,fontSize:12}}>⚡ Tomorrow</span>`;
-    if(row.daysUntil!==null&&row.daysUntil<=3)return html`<span style=${{color:'#fbbf24',fontSize:12}}>⚡ In ${row.daysUntil}d</span>`;
-    return html`<span style=${{color:'#4a86f5',fontSize:12}}>📅 Scheduled</span>`;
-  };
+    if(row.status==='published')return html`<span style=${{color:'#34d399',fontWeight:700,fontSize:11}}>✓ Published</span>`;
+    if(row.status==='skipped')return html`<span style=${{color:'#5a8ab0',fontSize:11}}>⏭ Skipped</span>`;
+    if(row.isPast)return html`<span style=${{color:'#f87171',fontSize:11}}>⚠ Overdue</span>`;
+    if(row.daysUntil!==null&&row.daysUntil<=1)return html`<span style=${{color:'#fbbf24',fontWeight:700,fontSize:11}}>⚡ Tomorrow</span>`;
+    if(row.daysUntil!==null&&row.daysUntil<=3)return html`<span style=${{color:'#fbbf24',fontSize:11}}>⚡ In ${row.daysUntil}d</span>`;
+    return html`<span style=${{color:'#4a86f5',fontSize:11}}>📅 Scheduled</span>`;
+  }
 
   return html`<div>
-    <!-- Summary counts -->
-    <div style=${{display:'flex',gap:10,marginBottom:20,flexWrap:'wrap'}}>
-      ${[
-        {l:'✓ Published',n:publishedCount,c:'#34d399'},
-        {l:'📅 Scheduled',n:scheduledCount,c:'#4a86f5'},
-        {l:'❌ Failed',n:failedCount,c:'#f87171'},
-        {l:'Total Tracked',n:caRows.length,c:'#5a8ab0'},
-      ].map(({l,n,c})=>html`<div style=${{background:'#0a1020',border:`0.5px solid ${c}30`,borderRadius:8,padding:'10px 18px',flex:1,minWidth:130,textAlign:'center'}}>
-        <div style=${{fontSize:22,fontWeight:800,color:c}}>${n}</div>
-        <div style=${{fontSize:11,color:'#5a8ab0',marginTop:2}}>${l}</div>
-      </div>`)}
+    <!-- Campaign filter chips -->
+    <div style=${{display:'flex',gap:6,marginBottom:16,flexWrap:'wrap'}}>
+      ${SCHED_CAMPAIGNS.map(({k,l,icon,color})=>{
+        const cnt=k==='all'?allRows.length:allRows.filter(r=>r.content_type===k).length;
+        const active=campFilter===k;
+        return html`<button key=${k} onClick=${()=>setCampFilter(k)} style=${{
+          background:active?color+'22':'#0a1020',color:active?color:'#5a8ab0',
+          border:`0.5px solid ${active?color+'55':'#17304e'}`,
+          borderRadius:20,padding:'5px 14px',fontSize:12,fontWeight:active?700:400,cursor:'pointer'
+        }}>${icon?icon+' ':''} ${l} (${cnt})</button>`;
+      })}
+    </div>
+
+    <!-- Summary chips -->
+    <div style=${{display:'flex',gap:10,marginBottom:16,flexWrap:'wrap'}}>
+      ${[{l:'✓ Published',n:publishedCount,c:'#34d399'},{l:'📅 Scheduled',n:scheduledCount,c:'#4a86f5'},{l:'❌ Failed',n:failedCount,c:'#f87171'},{l:'Total',n:allRows.length,c:'#5a8ab0'}]
+        .map(({l,n,c})=>html`<div style=${{background:'#0a1020',border:`0.5px solid ${c}25`,borderRadius:8,padding:'8px 14px',flex:1,minWidth:110,textAlign:'center'}}>
+          <div style=${{fontSize:20,fontWeight:800,color:c}}>${n}</div>
+          <div style=${{fontSize:10,color:'#5a8ab0',marginTop:1}}>${l}</div>
+        </div>`)}
     </div>
 
     <!-- Table -->
     <div style=${{background:'#0a1020',border:'0.5px solid #17304e',borderRadius:10,overflow:'hidden'}}>
-      <!-- Header -->
-      <div style=${{display:'grid',gridTemplateColumns:'32px 1fr 130px 90px 110px 80px 130px',gap:0,background:'#0e1830',borderBottom:'0.5px solid #17304e',padding:'10px 14px',fontSize:10,fontWeight:700,color:'#5a8ab0',textTransform:'uppercase',letterSpacing:'0.5px'}}>
-        <div>#</div><div>Campaign & Content</div><div>Channel</div><div>Week</div><div>Scheduled</div><div>Approved</div><div>Deployment</div>
+      <div style=${{display:'grid',gridTemplateColumns:'28px 120px 1fr 90px 100px 90px 115px',background:'#0e1830',borderBottom:'0.5px solid #17304e',padding:'9px 14px',fontSize:10,fontWeight:700,color:'#5a8ab0',textTransform:'uppercase',letterSpacing:'0.5px'}}>
+        <div>#</div><div>Campaign</div><div>Post Title</div><div>Week</div><div>Scheduled</div><div>Approved</div><div>Status</div>
       </div>
 
-      ${caRows.length===0&&html`<div style=${{textAlign:'center',padding:'60px 20px',color:'#274466'}}>
-        <div style=${{fontSize:28,marginBottom:10}}>🚀</div>
-        <div>No approved or published content yet.</div>
+      ${filtered.length===0&&html`<div style=${{textAlign:'center',padding:'50px 20px',color:'#274466'}}>
+        <div style=${{fontSize:24,marginBottom:8}}>🚀</div><div>No content for this campaign yet.</div>
       </div>`}
 
-      ${caRows.map((row,i)=>{
+      ${filtered.map((row,i)=>{
         const isPublished=row.status==='published';
         const hasError=!!row.deployment_error;
-        const rowBg=i%2===0?'transparent':'rgba(14,24,48,0.4)';
-        const borderHighlight=hasError?'rgba(248,113,113,0.15)':isPublished?'rgba(52,211,153,0.05)':'transparent';
         return html`<div key=${row.id} style=${{
-          display:'grid',gridTemplateColumns:'32px 1fr 130px 90px 110px 80px 130px',gap:0,
-          padding:'11px 14px',borderBottom:'0.5px solid #13213e',background:borderHighlight||rowBg,
+          display:'grid',gridTemplateColumns:'28px 120px 1fr 90px 100px 90px 115px',
+          padding:'10px 14px',borderBottom:'0.5px solid #0d1a2e',
+          background:hasError?'rgba(248,113,113,0.06)':isPublished?'rgba(52,211,153,0.03)':i%2?'rgba(14,24,48,0.35)':'transparent',
           alignItems:'center'
         }}>
-          <div style=${{color:'#274466',fontSize:11}}>${i+1}</div>
+          <div style=${{color:'#1a3055',fontSize:10}}>${i+1}</div>
           <div>
-            <div style=${{color:'#cfe0f5',fontSize:12,fontWeight:500,marginBottom:1}}>${row.subject?.replace(/^[🏓📧📸]\s*/,'').slice(0,55)||'—'}</div>
-            <div style=${{color:'#274466',fontSize:10}}>${row.campaign}</div>
+            <span style=${{background:row.meta.color+'18',color:row.meta.color,borderRadius:8,padding:'2px 7px',fontSize:10,fontWeight:700}}>
+              ${row.meta.icon} ${row.meta.label}
+            </span>
+            <div style=${{color:'#274466',fontSize:9,marginTop:2}}>${row.channel}</div>
           </div>
-          <div style=${{color:'#5a8ab0',fontSize:11}}>${CT_ICON[row.content_type]||'📄'} ${CT_LABEL[row.content_type]||row.content_type}</div>
+          <div>
+            <div style=${{color:'#cfe0f5',fontSize:12,fontWeight:500,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>${row.title.slice(0,50)||'—'}</div>
+            ${row.platform_post_id?html`<div style=${{color:'#34d399',fontSize:9,marginTop:1}}>ID: ${row.platform_post_id}</div>`:''}
+          </div>
           <div style=${{color:'#4a86f5',fontWeight:700,fontSize:12}}>Wk ${row.week_number||'—'}</div>
-          <div style=${{color:'#5a8ab0',fontSize:11}}>${fmtDateShort(row.scheduled_for)}</div>
-          <div style=${{color:'#274466',fontSize:10}}>${fmtDateShort(row.approved_at)}</div>
-          <div><${StatusCell} row=${row} /></div>
+          <div style=${{color:'#5a8ab0',fontSize:11}}>${fmtShort(row.scheduled_for)}</div>
+          <div style=${{color:'#274466',fontSize:10}}>${fmtShort(row.approved_at)}</div>
+          <div><${StatusCell} row=${row}/></div>
         </div>`;
       })}
     </div>
 
-    ${standaloneAssets.length>0&&html`<div style=${{marginTop:24}}>
-      <div style=${{marginBottom:8,color:'#5a8ab0',fontWeight:700,fontSize:11,textTransform:'uppercase',letterSpacing:'1px'}}>Other Published Assets</div>
-      ${standaloneAssets.map((a,i)=>html`<div key=${a.id} style=${{background:'#0a1020',border:'0.5px solid #13213e',borderRadius:8,padding:'10px 14px',marginBottom:5,display:'flex',justifyContent:'space-between',alignItems:'center',gap:12,flexWrap:'wrap'}}>
+    ${standaloneAssets.length>0&&html`<div style=${{marginTop:20}}>
+      <div style=${{marginBottom:6,color:'#5a8ab0',fontWeight:700,fontSize:10,textTransform:'uppercase',letterSpacing:'1px'}}>Other Published Assets</div>
+      ${standaloneAssets.map(a=>html`<div key=${a.id} style=${{background:'#0a1020',border:'0.5px solid #13213e',borderRadius:8,padding:'9px 14px',marginBottom:4,display:'flex',justifyContent:'space-between',alignItems:'center',gap:12,flexWrap:'wrap'}}>
         <div>
           <div style=${{color:'#cfe0f5',fontSize:12,fontWeight:500}}>${a.asset_name||a.campaign_id}</div>
           <div style=${{color:'#274466',fontSize:10}}>${a.campaign_name} · ${a.channel} · v${a.variant_label||'A'}</div>
         </div>
-        <div style=${{display:'flex',gap:8,alignItems:'center',flexShrink:0}}>
-          ${a.platform_post_id?html`<span style=${{color:'#34d399',fontSize:11}}>✓ Post ID: ${a.platform_post_id.slice(0,16)}…</span>`:''}
+        <div style=${{display:'flex',gap:6,alignItems:'center'}}>
           ${a.deployment_error?html`<span style=${{color:'#f87171',fontSize:11}}>❌ ${a.deployment_error.slice(0,50)}</span>`:html`<span style=${{color:'#34d399',fontWeight:700,fontSize:12}}>✓ Published</span>`}
         </div>
       </div>`)}
@@ -787,7 +802,7 @@ function DeploymentTab({deployments}){
   </div>`;
 }
 
-// ── SCHEDULE TAB ─────────────────────────────────────────────
+// ── SHARED CONSTANTS ─────────────────────────────────────────
 const CA_STATUS_MAP={
   pending:     {l:'Pending Approval',c:'#fbbf24',icon:'⏳'},
   approved:    {l:'Approved',        c:'#34d399',icon:'✓'},
@@ -797,112 +812,129 @@ const CA_STATUS_MAP={
   awaiting_revision: {l:'In Revision',c:'#a78bfa',icon:'✏️'},
   held:        {l:'On Hold',         c:'#5a8ab0',icon:'⏸'},
 };
-const CT_META={
-  email:      {icon:'📧',label:'Drill Email',    color:'#4a86f5'},
-  social:     {icon:'📸📘',label:'Social Post',  color:'#fb923c'},
-  real_gains: {icon:'🏓',label:'Real Gains Post',color:'#2dd4bf'},
+const CAMPAIGN_META={
+  email:      {icon:'📧',label:'TDOW Email',     campaign:'TDOW Email Series',        channel:'📧 Email Blast',            color:'#4a86f5'},
+  social:     {icon:'📸',label:'TDOW Social',    campaign:'TDOW Social Series',       channel:'📸 Instagram · 📘 Facebook', color:'#fb923c'},
+  real_gains: {icon:'🏓',label:'Real Gains',     campaign:'Real Gains w/ Titan',      channel:'📸 Instagram · 📘 Facebook', color:'#2dd4bf'},
 };
+const SCHED_CAMPAIGNS=[
+  {k:'all',    l:'All Active Campaigns', color:'#4a86f5'},
+  {k:'email',  l:'TDOW Email',    icon:'📧', color:'#4a86f5'},
+  {k:'social', l:'TDOW Social',   icon:'📸', color:'#fb923c'},
+  {k:'real_gains',l:'Real Gains', icon:'🏓', color:'#2dd4bf'},
+];
+
+// ── SCHEDULE TAB ─────────────────────────────────────────────
 function ScheduleTab({schedule}){
+  const[campFilter,setCampFilter]=useState('all');
   const now=new Date();
-  const fmtSched=d=>{
+
+  const fmtDay=d=>{
+    if(!d)return'—';
     const dt=new Date(d);
-    const day=dt.toLocaleDateString('en-MY',{weekday:'short',day:'numeric',month:'short',year:'numeric'});
-    const daysAway=Math.ceil((dt-now)/(1000*60*60*24));
-    if(daysAway<0)return day+' (sent)';
-    if(daysAway===0)return day+' (today)';
-    if(daysAway===1)return day+' (tomorrow)';
-    if(daysAway<=7)return day+` (in ${daysAway}d)`;
-    return day;
+    return dt.toLocaleDateString('en-MY',{weekday:'short',day:'numeric',month:'short',year:'numeric'});
   };
+  const daysAway=d=>Math.ceil((new Date(d)-now)/(1000*60*60*24));
+
+  const filtered=(campFilter==='all'?schedule:schedule.filter(s=>s.content_type===campFilter))
+    .filter(s=>s.scheduled_for); // exclude null dates
+  const upcoming=filtered.filter(s=>s.status!=='published'&&new Date(s.scheduled_for)>=now)
+    .sort((a,b)=>new Date(a.scheduled_for)-new Date(b.scheduled_for));
+  const past=filtered.filter(s=>s.status==='published'||new Date(s.scheduled_for)<now)
+    .sort((a,b)=>new Date(b.scheduled_for)-new Date(a.scheduled_for));
+
   if(!schedule.length)return html`<div style=${{textAlign:'center',padding:'80px 20px',color:'#274466'}}>
-    <div style=${{fontSize:32,marginBottom:12}}>📅</div>
-    <div>No scheduled content yet.</div>
+    <div style=${{fontSize:32,marginBottom:12}}>📅</div><div>No scheduled content yet.</div>
   </div>`;
 
-  // Summary stats
-  const types=['email','real_gains','social'];
-  const sent=schedule.filter(s=>new Date(s.scheduled_for)<now||s.status==='published').length;
-  const approved=schedule.filter(s=>s.status==='approved').length;
-  const pending=schedule.filter(s=>s.status==='pending').length;
-  const total=schedule.length;
+  function SchedRow({item,dim}){
+    const m=CAMPAIGN_META[item.content_type]||{icon:'📄',label:item.content_type,campaign:item.content_type,channel:'',color:'#5a8ab0'};
+    const st=CA_STATUS_MAP[item.status]||{l:item.status,c:'#5a8ab0',icon:''};
+    const da=daysAway(item.scheduled_for);
+    const isUrgent=da>=0&&da<=3&&item.status==='pending';
+    // Strip prefix from subject for clean title
+    const title=(item.subject||'').replace(/^(TDOW (Email|Social) Wk\d+:|Real Gains Wk\d+:)\s*/i,'').replace(/^[🏓📧📸]+\s*/,'');
+    return html`<div style=${{
+      background:'#0a1020',
+      border:`0.5px solid ${isUrgent?'rgba(251,191,36,0.45)':item.status==='approved'?'rgba(52,211,153,0.2)':'#13213e'}`,
+      borderRadius:8,padding:'11px 16px',marginBottom:5,opacity:dim?0.55:1
+    }}>
+      <div style=${{display:'flex',alignItems:'center',gap:10,flexWrap:'wrap'}}>
+        <!-- Campaign pill -->
+        <span style=${{background:m.color+'18',color:m.color,border:`0.5px solid ${m.color}35`,borderRadius:10,padding:'2px 9px',fontSize:10,fontWeight:700,flexShrink:0}}>
+          ${m.icon} ${m.campaign}
+        </span>
+        <!-- Channel -->
+        <span style=${{color:'#5a8ab0',fontSize:10,flexShrink:0}}>${m.channel}</span>
+        <!-- Week -->
+        <span style=${{color:m.color,fontWeight:800,fontSize:12,flexShrink:0}}>Wk ${item.week_number}</span>
+        <!-- Title -->
+        <span style=${{flex:1,minWidth:100,color:'#cfe0f5',fontSize:13,fontWeight:500,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>${title.slice(0,65)}</span>
+        <!-- Date -->
+        <span style=${{color:'#5a8ab0',fontSize:11,flexShrink:0}}>
+          📅 ${fmtDay(item.scheduled_for)}${da===0?' (today)':da===1?' (tomorrow)':da>0&&da<=7?` (in ${da}d)`:da<0&&!dim?' ⚠ overdue':''}
+        </span>
+        <!-- Status + urgency -->
+        <div style=${{display:'flex',gap:5,alignItems:'center',flexShrink:0}}>
+          ${isUrgent?html`<span style=${{background:'rgba(251,191,36,0.12)',color:'#fbbf24',border:'0.5px solid rgba(251,191,36,0.35)',borderRadius:10,padding:'2px 7px',fontSize:10,fontWeight:700}}>⚡ SOON</span>`:''}
+          <span style=${{background:`${st.c}15`,color:st.c,border:`0.5px solid ${st.c}35`,borderRadius:20,padding:'2px 9px',fontSize:11,fontWeight:600,whiteSpace:'nowrap'}}>${st.icon} ${st.l}</span>
+        </div>
+      </div>
+    </div>`;
+  }
 
   return html`<div>
-    <!-- Summary bar -->
-    <div style=${{display:'flex',gap:10,marginBottom:20,flexWrap:'wrap'}}>
-      ${types.map(ct=>{
-        const items=schedule.filter(s=>s.content_type===ct);
-        if(!items.length)return null;
-        const m=CT_META[ct]||{icon:'📄',label:ct,color:'#5a8ab0'};
-        const app=items.filter(s=>s.status==='approved'||s.status==='published').length;
-        const pend=items.filter(s=>s.status==='pending').length;
-        return html`<div key=${ct} style=${{background:'#0a1020',border:`0.5px solid ${m.color}30`,borderRadius:8,padding:'10px 16px',flex:1,minWidth:160}}>
-          <div style=${{fontSize:13,fontWeight:600,color:'#cfe0f5',marginBottom:3}}>${m.icon} ${m.label}</div>
-          <div style=${{fontSize:11,color:'#5a8ab0'}}>${app}/${items.length} approved${pend>0?` · ${pend} need review`:''}</div>
-        </div>`;
+    <!-- Campaign filter chips -->
+    <div style=${{display:'flex',gap:6,marginBottom:16,flexWrap:'wrap'}}>
+      ${SCHED_CAMPAIGNS.map(({k,l,icon,color})=>{
+        const cnt=k==='all'?schedule.filter(s=>s.scheduled_for).length:schedule.filter(s=>s.content_type===k&&s.scheduled_for).length;
+        const active=campFilter===k;
+        return html`<button key=${k} onClick=${()=>setCampFilter(k)} style=${{
+          background:active?color+'22':'#0a1020',color:active?color:'#5a8ab0',
+          border:`0.5px solid ${active?color+'55':'#17304e'}`,
+          borderRadius:20,padding:'5px 14px',fontSize:12,fontWeight:active?700:400,cursor:'pointer',transition:'all 0.15s'
+        }}>${icon?icon+' ':''} ${l} (${cnt})</button>`;
       })}
-      <div style=${{background:'#0a1020',border:'0.5px solid #17304e',borderRadius:8,padding:'10px 16px',flex:1,minWidth:160}}>
-        <div style=${{fontSize:13,fontWeight:600,color:'#cfe0f5',marginBottom:3}}>📊 Total</div>
-        <div style=${{fontSize:11,color:'#5a8ab0'}}>${total} items · ${sent} sent · ${pending} pending review</div>
-      </div>
     </div>
 
-    <!-- Section: Upcoming -->
-    <div style=${{marginBottom:6,color:'#4a86f5',fontWeight:700,fontSize:11,textTransform:'uppercase',letterSpacing:'1px'}}>Upcoming Content</div>
-    ${schedule.filter(s=>new Date(s.scheduled_for)>=now&&s.status!=='published').map((item,i)=>{
-      const m=CT_META[item.content_type]||{icon:'📄',label:item.content_type,color:'#5a8ab0'};
-      const st=CA_STATUS_MAP[item.status]||{l:item.status,c:'#5a8ab0',icon:''};
-      const urgency=Math.ceil((new Date(item.scheduled_for)-now)/(1000*60*60*24));
-      const isUrgent=urgency<=3&&item.status==='pending';
-      return html`<div key=${item.id} style=${{
-        background:'#0a1020',
-        border:`0.5px solid ${isUrgent?'rgba(251,191,36,0.5)':item.status==='approved'?'rgba(52,211,153,0.25)':'#17304e'}`,
-        borderRadius:8,padding:'11px 16px',marginBottom:6,
-        display:'flex',alignItems:'center',justifyContent:'space-between',gap:12,flexWrap:'wrap'
-      }}>
-        <div style=${{display:'flex',alignItems:'center',gap:12,flex:1,minWidth:0}}>
-          <div style=${{textAlign:'center',minWidth:36,flexShrink:0}}>
-            <div style=${{fontWeight:800,fontSize:14,color:m.color}}>Wk${item.week_number}</div>
-            <div style=${{fontSize:10,color:'#274466'}}>${m.icon}</div>
-          </div>
-          <div style=${{flex:1,minWidth:0}}>
-            <div style=${{color:'#cfe0f5',fontSize:13,fontWeight:500,marginBottom:2,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>${(item.subject||'').replace(/^🏓 .*?:\s*/,'').replace(/^📧 .*?:\s*/,'')}</div>
-            <div style=${{color:'#5a8ab0',fontSize:11}}>${m.label} · 📅 ${fmtSched(item.scheduled_for)}</div>
-          </div>
-        </div>
-        <div style=${{display:'flex',alignItems:'center',gap:6,flexShrink:0}}>
-          ${isUrgent?html`<span style=${{background:'rgba(251,191,36,0.15)',color:'#fbbf24',border:'0.5px solid rgba(251,191,36,0.4)',borderRadius:12,padding:'2px 8px',fontSize:10,fontWeight:700}}>⚡ SOON</span>`:''}
-          <span style=${{background:`${st.c}18`,color:st.c,border:`0.5px solid ${st.c}40`,borderRadius:20,padding:'3px 10px',fontSize:11,fontWeight:600,whiteSpace:'nowrap'}}>${st.icon} ${st.l}</span>
-        </div>
-      </div>`;
-    })}
-
-    <!-- Section: Sent/Published -->
-    ${schedule.filter(s=>new Date(s.scheduled_for)<now||s.status==='published').length>0&&html`
-      <div style=${{marginTop:24,marginBottom:6,color:'#274466',fontWeight:700,fontSize:11,textTransform:'uppercase',letterSpacing:'1px'}}>Already Sent / Published</div>
-      ${schedule.filter(s=>new Date(s.scheduled_for)<now||s.status==='published').map(item=>{
-        const m=CT_META[item.content_type]||{icon:'📄',label:item.content_type,color:'#5a8ab0'};
-        const st=CA_STATUS_MAP[item.status]||{l:item.status,c:'#5a8ab0',icon:''};
-        return html`<div key=${item.id} style=${{background:'#0a1020',border:'0.5px solid #13213e',borderRadius:8,padding:'10px 16px',marginBottom:5,display:'flex',alignItems:'center',justifyContent:'space-between',gap:12,opacity:0.65,flexWrap:'wrap'}}>
-          <div style=${{display:'flex',alignItems:'center',gap:10,flex:1,minWidth:0}}>
-            <div style=${{minWidth:36,flexShrink:0}}>
-              <div style=${{fontWeight:700,fontSize:13,color:'#274466'}}>Wk${item.week_number}</div>
-              <div style=${{fontSize:10,color:'#1a3055'}}>${m.icon}</div>
-            </div>
-            <div style=${{flex:1,minWidth:0}}>
-              <div style=${{color:'#5a8ab0',fontSize:12,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>${(item.subject||'').replace(/^[^\s]+ [^:]+:\s*/,'')}</div>
-              <div style=${{color:'#274466',fontSize:10}}>${m.label} · ${fmtSched(item.scheduled_for)}</div>
-            </div>
-          </div>
-          <span style=${{color:st.c,fontSize:11,fontWeight:600,whiteSpace:'nowrap'}}>${st.icon} ${st.l}</span>
+    <!-- Per-campaign summary chips -->
+    <div style=${{display:'flex',gap:8,marginBottom:18,flexWrap:'wrap'}}>
+      ${(['email','social','real_gains']).filter(ct=>campFilter==='all'||campFilter===ct).map(ct=>{
+        const items=schedule.filter(s=>s.content_type===ct);
+        if(!items.length)return null;
+        const m=CAMPAIGN_META[ct];
+        const app=items.filter(s=>s.status==='approved'||s.status==='published').length;
+        const pend=items.filter(s=>s.status==='pending').length;
+        return html`<div key=${ct} style=${{background:'#0a1020',border:`0.5px solid ${m.color}28`,borderRadius:8,padding:'9px 14px',flex:1,minWidth:150}}>
+          <div style=${{fontSize:12,fontWeight:700,color:'#cfe0f5',marginBottom:2}}>${m.icon} ${m.campaign}</div>
+          <div style=${{fontSize:10,color:'#5a8ab0'}}>${m.channel}</div>
+          <div style=${{fontSize:11,color:'#5a8ab0',marginTop:3}}>${app}/${items.length} approved${pend>0?html` · <span style=${{color:'#fbbf24'}}>${pend} need review</span>`:'✓'}</div>
         </div>`;
       })}
-    `}
+    </div>
+
+    <!-- Upcoming -->
+    ${upcoming.length>0&&html`<div style=${{marginBottom:18}}>
+      <div style=${{marginBottom:8,color:'#4a86f5',fontWeight:700,fontSize:10,textTransform:'uppercase',letterSpacing:'1.5px'}}>📅 Upcoming (${upcoming.length})</div>
+      ${upcoming.map(item=>html`<${SchedRow} key=${item.id} item=${item} dim=${false}/>`)}
+    </div>`}
+
+    <!-- Sent / Published -->
+    ${past.length>0&&html`<div>
+      <div style=${{marginBottom:8,color:'#274466',fontWeight:700,fontSize:10,textTransform:'uppercase',letterSpacing:'1.5px'}}>✓ Sent / Published (${past.length})</div>
+      ${past.map(item=>html`<${SchedRow} key=${item.id} item=${item} dim=${true}/>`)}
+    </div>`}
+
+    ${upcoming.length===0&&past.length===0&&html`<div style=${{textAlign:'center',padding:'60px 20px',color:'#274466'}}>
+      <div style=${{fontSize:28,marginBottom:10}}>📅</div>
+      <div>No content for this campaign.</div>
+    </div>`}
   </div>`;
 }
 
 // ── MAIN APP ─────────────────────────────────────────────────
 function App(){
-  const[activeTab,setActiveTab]=useState('copy');
+  const[activeTab,setActiveTab]=useState('content');
   const[copyItems,setCopyItems]=useState([]);
   const[mediaAssets,setMediaAssets]=useState([]);
   const[clients,setClients]=useState([]);
@@ -910,6 +942,7 @@ function App(){
   const[busy,setBusy]=useState({});
   const[filterStatus,setFilterStatus]=useState('pending_review');
   const[filterClient,setFilterClient]=useState('all');
+  const[filterCampaign,setFilterCampaign]=useState('all');
   const[lastRefresh,setLastRefresh]=useState(null);
   const[schedule,setSchedule]=useState([]);
   const[rgSchedule,setRgSchedule]=useState({});
@@ -954,11 +987,21 @@ function App(){
     setMediaAssets(prev=>prev.map(a=>a.id===asset.id?asset:a));
   }
 
-  // Stats
+  // Stats — combined across copy + media for Content tab
   const copyCounts={all:copyItems.length};
   Object.keys(STATUS).forEach(s=>{copyCounts[s]=copyItems.filter(i=>i.status===s).length;});
   const mediaCounts={all:mediaAssets.length};
   Object.keys(STATUS).forEach(s=>{mediaCounts[s]=mediaAssets.filter(a=>a.status===s).length;});
+  // Combined counts for Content tab
+  const contentCounts={all:copyItems.length+mediaAssets.length};
+  Object.keys(STATUS).forEach(s=>{contentCounts[s]=(copyCounts[s]||0)+(mediaCounts[s]||0);});
+
+  // Campaign detector for media assets
+  const assetCampaign=asset=>{
+    if(rgSchedule[asset.id])return'real_gains';
+    if(asset.channel==='email')return'email';
+    return'social';
+  };
 
   const filteredCopy=copyItems.filter(item=>{
     if(filterStatus!=='all'&&item.status!==filterStatus)return false;
@@ -968,24 +1011,25 @@ function App(){
   const filteredMedia=mediaAssets.filter(asset=>{
     if(filterStatus!=='all'&&asset.status!==filterStatus)return false;
     if(filterClient!=='all'&&asset.client_id!==filterClient)return false;
+    if(filterCampaign!=='all'&&assetCampaign(asset)!==filterCampaign)return false;
     return true;
   }).sort((a,b)=>{
-    // Real Gains assets: sort by week_number (earliest = most urgent first)
+    // Sort by week_number for Real Gains (most urgent first), then by created_at
     const wa=rgSchedule[a.id]?.week_number,wb=rgSchedule[b.id]?.week_number;
     if(wa&&wb)return wa-wb;
-    if(wa)return -1; // Real Gains floats to top
+    if(wa)return -1;
     if(wb)return 1;
     return new Date(a.created_at)-new Date(b.created_at);
   });
 
-  const counts=activeTab==='copy'?copyCounts:mediaCounts;
+  const counts=contentCounts;
   const statusTabs=[
     {k:'all',l:'All'},{k:'pending_review',l:'Pending'},{k:'revision_requested',l:'Revision Needed'},
     {k:'approved',l:'Approved'},{k:'rejected',l:'Rejected'},{k:'published',l:'Published'},
   ];
 
-  const pendingCopy=copyCounts['pending_review']||0;
-  const pendingMedia=mediaCounts['pending_review']||0;
+  const pendingContent=(contentCounts['pending_review']||0);
+  const showFilters=activeTab==='content';
 
   return html`<div style=${{minHeight:'100vh',background:C.bg}}>
 
@@ -1009,45 +1053,56 @@ function App(){
     <div style=${{maxWidth:1100,margin:'0 auto',padding:'20px'}}>
 
       <!-- Tab switcher -->
-      <div style=${{display:'flex',gap:8,marginBottom:20}}>
-        <button onClick=${()=>setActiveTab('copy')} style=${{background:activeTab==='copy'?C.ac:C.s1,color:activeTab==='copy'?'#fff':C.dm,border:`0.5px solid ${activeTab==='copy'?C.ac:C.bd}`,borderRadius:8,padding:'9px 20px',fontSize:14,fontWeight:600,cursor:'pointer',position:'relative'}}>
-          📝 Copy
-          ${pendingCopy>0?html`<span style=${{position:'absolute',top:-6,right:-6,background:C.wn,color:'#0a0a00',borderRadius:10,padding:'1px 6px',fontSize:10,fontWeight:700}}>${pendingCopy}</span>`:''}
+      <div style=${{display:'flex',gap:8,marginBottom:20,flexWrap:'wrap'}}>
+        <button onClick=${()=>setActiveTab('content')} style=${{background:activeTab==='content'?C.pu:C.s1,color:activeTab==='content'?'#fff':C.dm,border:`0.5px solid ${activeTab==='content'?C.pu:C.bd}`,borderRadius:8,padding:'9px 22px',fontSize:14,fontWeight:600,cursor:'pointer',position:'relative'}}>
+          📋 Content
+          ${pendingContent>0?html`<span style=${{position:'absolute',top:-6,right:-6,background:C.wn,color:'#0a0a00',borderRadius:10,padding:'1px 6px',fontSize:10,fontWeight:700}}>${pendingContent}</span>`:''}
         </button>
-        <button onClick=${()=>setActiveTab('media')} style=${{background:activeTab==='media'?C.pu:C.s1,color:activeTab==='media'?'#fff':C.dm,border:`0.5px solid ${activeTab==='media'?C.pu:C.bd}`,borderRadius:8,padding:'9px 20px',fontSize:14,fontWeight:600,cursor:'pointer',position:'relative'}}>
-          🖼 Media Assets
-          ${pendingMedia>0?html`<span style=${{position:'absolute',top:-6,right:-6,background:C.wn,color:'#0a0a00',borderRadius:10,padding:'1px 6px',fontSize:10,fontWeight:700}}>${pendingMedia}</span>`:''}
-        </button>
-        <button onClick=${()=>setActiveTab('schedule')} style=${{background:activeTab==='schedule'?C.tl:C.s1,color:activeTab==='schedule'?'#001a18':C.dm,border:`0.5px solid ${activeTab==='schedule'?C.tl:C.bd}`,borderRadius:8,padding:'9px 20px',fontSize:14,fontWeight:600,cursor:'pointer'}}>
+        <button onClick=${()=>setActiveTab('schedule')} style=${{background:activeTab==='schedule'?C.tl:C.s1,color:activeTab==='schedule'?'#001a18':C.dm,border:`0.5px solid ${activeTab==='schedule'?C.tl:C.bd}`,borderRadius:8,padding:'9px 22px',fontSize:14,fontWeight:600,cursor:'pointer'}}>
           📅 Schedule
         </button>
-        <button onClick=${()=>setActiveTab('deployments')} style=${{background:activeTab==='deployments'?'#6366f1':C.s1,color:activeTab==='deployments'?'#fff':C.dm,border:`0.5px solid ${activeTab==='deployments'?'#6366f1':C.bd}`,borderRadius:8,padding:'9px 20px',fontSize:14,fontWeight:600,cursor:'pointer'}}>
+        <button onClick=${()=>setActiveTab('deployments')} style=${{background:activeTab==='deployments'?'#6366f1':C.s1,color:activeTab==='deployments'?'#fff':C.dm,border:`0.5px solid ${activeTab==='deployments'?'#6366f1':C.bd}`,borderRadius:8,padding:'9px 22px',fontSize:14,fontWeight:600,cursor:'pointer'}}>
           🚀 Deployments
         </button>
       </div>
 
-      <!-- Stats row -->
-      <div style=${{display:'flex',gap:10,marginBottom:20,flexWrap:'wrap'}}>
-        ${Object.entries(STATUS).map(([k,cfg])=>html`<div key=${k} style=${{background:C.s1,border:`0.5px solid ${counts[k]>0?cfg.c+'50':C.bd}`,borderRadius:8,padding:'10px 16px',textAlign:'center',minWidth:100,flex:1}}>
-          <div style=${{fontSize:22,fontWeight:700,color:counts[k]>0?cfg.c:C.mt}}>${counts[k]||0}</div>
-          <div style=${{fontSize:10,color:C.dm,textTransform:'uppercase',letterSpacing:'0.5px',marginTop:2,lineHeight:1.3}}>${cfg.l}</div>
-        </div>`)}
-      </div>
-
-      <!-- Filters -->
-      <div style=${{background:C.s1,border:`0.5px solid ${C.bd}`,borderRadius:10,padding:'14px 16px',marginBottom:20}}>
-        <div style=${{display:'flex',gap:6,flexWrap:'wrap',marginBottom:10}}>
-          ${statusTabs.map(({k,l})=>html`<button key=${k} onClick=${()=>setFilterStatus(k)}
-            style=${{background:filterStatus===k?(activeTab==='copy'?C.ac:C.pu):C.s3,color:filterStatus===k?'#fff':C.dm,border:`0.5px solid ${filterStatus===k?(activeTab==='copy'?C.ac:C.pu):C.bd}`,borderRadius:6,padding:'5px 13px',fontSize:12,cursor:'pointer'}}>
-            ${l} (${counts[k]||0})
-          </button>`)}
+      <!-- Stats row (Content tab only) -->
+      ${showFilters&&html`<div>
+        <div style=${{display:'flex',gap:10,marginBottom:16,flexWrap:'wrap'}}>
+          ${Object.entries(STATUS).map(([k,cfg])=>html`<div key=${k} style=${{background:C.s1,border:`0.5px solid ${counts[k]>0?cfg.c+'50':C.bd}`,borderRadius:8,padding:'10px 16px',textAlign:'center',minWidth:90,flex:1}}>
+            <div style=${{fontSize:20,fontWeight:700,color:counts[k]>0?cfg.c:C.mt}}>${counts[k]||0}</div>
+            <div style=${{fontSize:10,color:C.dm,textTransform:'uppercase',letterSpacing:'0.5px',marginTop:2,lineHeight:1.3}}>${cfg.l}</div>
+          </div>`)}
         </div>
-        <select value=${filterClient} onChange=${e=>setFilterClient(e.target.value)}
-          style=${{background:C.s2,border:`0.5px solid ${C.bd}`,borderRadius:6,color:C.tx,padding:'6px 10px',fontSize:12,minWidth:180,outline:'none'}}>
-          <option value="all">All Clients</option>
-          ${clients.map(c=>html`<option key=${c.id} value=${c.id}>${c.basics?.brandName||c.basics?.clientName||c.id}</option>`)}
-        </select>
-      </div>
+
+        <!-- Campaign filter chips -->
+        <div style=${{display:'flex',gap:6,flexWrap:'wrap',marginBottom:10}}>
+          ${SCHED_CAMPAIGNS.map(({k,l,icon,color})=>{
+            const cnt=k==='all'?mediaAssets.length:mediaAssets.filter(a=>assetCampaign(a)===k).length;
+            const active=filterCampaign===k;
+            return html`<button key=${k} onClick=${()=>setFilterCampaign(k)} style=${{
+              background:active?color+'22':'transparent',color:active?color:'#5a8ab0',
+              border:`0.5px solid ${active?color+'55':'#17304e'}`,
+              borderRadius:20,padding:'4px 13px',fontSize:12,fontWeight:active?700:400,cursor:'pointer'
+            }}>${icon?icon+' ':''} ${l} (${cnt})</button>`;
+          })}
+        </div>
+
+        <!-- Status filter + client dropdown -->
+        <div style=${{background:C.s1,border:`0.5px solid ${C.bd}`,borderRadius:10,padding:'12px 14px',marginBottom:16}}>
+          <div style=${{display:'flex',gap:6,flexWrap:'wrap',marginBottom:8}}>
+            ${statusTabs.map(({k,l})=>html`<button key=${k} onClick=${()=>setFilterStatus(k)}
+              style=${{background:filterStatus===k?C.pu:C.s3,color:filterStatus===k?'#fff':C.dm,border:`0.5px solid ${filterStatus===k?C.pu:C.bd}`,borderRadius:6,padding:'5px 12px',fontSize:12,cursor:'pointer'}}>
+              ${l} (${counts[k]||0})
+            </button>`)}
+          </div>
+          <select value=${filterClient} onChange=${e=>setFilterClient(e.target.value)}
+            style=${{background:C.s2,border:`0.5px solid ${C.bd}`,borderRadius:6,color:C.tx,padding:'6px 10px',fontSize:12,minWidth:180,outline:'none'}}>
+            <option value="all">All Clients</option>
+            ${clients.map(c=>html`<option key=${c.id} value=${c.id}>${c.basics?.brandName||c.basics?.clientName||c.id}</option>`)}
+          </select>
+        </div>
+      </div>`}
 
       <!-- Content -->
       ${loading
@@ -1056,25 +1111,25 @@ function App(){
           ?html`<${DeploymentTab} deployments=${deployments} />`
           :activeTab==='schedule'
           ?html`<${ScheduleTab} schedule=${schedule} />`
-          :activeTab==='copy'
-            ?(filteredCopy.length===0
-              ?html`<div style=${{textAlign:'center',padding:'80px 20px',color:C.mt}}>
-                <div style=${{fontSize:32,marginBottom:12}}>${copyItems.length===0?'📭':'🔍'}</div>
-                <div style=${{fontSize:14}}>${copyItems.length===0?'Copy queue is empty':'No copy matches current filters'}</div>
-              </div>`
-              :filteredCopy.map(item=>html`<${CopyContentCard} key=${item.id} item=${item} onUpdate=${handleCopyUpdate} onDelete=${handleCopyDelete} busy=${!!busy[item.id]} />`))
-            :(filteredMedia.length===0
-              ?html`<div style=${{textAlign:'center',padding:'80px 20px',color:C.mt}}>
-                <div style=${{fontSize:32,marginBottom:12}}>${mediaAssets.length===0?'🖼':'🔍'}</div>
-                <div style=${{fontSize:14,marginBottom:8}}>${mediaAssets.length===0?'No media assets yet':'No assets match current filters'}</div>
-                ${mediaAssets.length===0?html`<div style=${{fontSize:12,color:C.bd,maxWidth:400,margin:'0 auto',lineHeight:1.6}}>
-                  Media assets will appear here once a campaign brief triggers the AI generation pipeline.<br/>
-                  Add your Fal.ai API key in Supabase settings to enable automatic generation.
-                </div>`:''}
-              </div>`
-              :html`<div style=${{display:'grid',gridTemplateColumns:'repeat(auto-fill,minmax(340px,1fr))',gap:16}}>
+          :/* activeTab === 'content' */
+            html`<div>
+              ${filteredMedia.length===0&&filteredCopy.length===0&&html`<div style=${{textAlign:'center',padding:'80px 20px',color:C.mt}}>
+                  <div style=${{fontSize:32,marginBottom:12}}>${mediaAssets.length===0&&copyItems.length===0?'📭':'🔍'}</div>
+                  <div style=${{fontSize:14}}>${mediaAssets.length===0&&copyItems.length===0?'No content yet — run a campaign to generate assets':'No content matches current filters'}</div>
+                </div>`}
+              <!-- Media assets grid -->
+              ${filteredMedia.length>0&&html`<div style=${{display:'grid',gridTemplateColumns:'repeat(auto-fill,minmax(340px,1fr))',gap:16,marginBottom:24}}>
                 ${filteredMedia.map(asset=>html`<${MediaAssetCard} key=${asset.id} asset=${asset} weekInfo=${rgSchedule[asset.id]||null} onUpdate=${handleAssetUpdate} />`)}
-              </div>`)
+              </div>`}
+              <!-- Copy queue section (only shown if items exist) -->
+              ${filteredCopy.length>0&&html`<div>
+                <div style=${{marginBottom:10,color:'#5a8ab0',fontWeight:700,fontSize:10,textTransform:'uppercase',letterSpacing:'1.5px',display:'flex',alignItems:'center',gap:8}}>
+                  <span>📝 Email Copy Queue (${filteredCopy.length})</span>
+                  <div style=${{flex:1,height:'0.5px',background:'#17304e'}}></div>
+                </div>
+                ${filteredCopy.map(item=>html`<${CopyContentCard} key=${item.id} item=${item} onUpdate=${handleCopyUpdate} onDelete=${handleCopyDelete} busy=${!!busy[item.id]} />`)}
+              </div>`}
+            </div>`
       }
     </div>
   </div>`;
