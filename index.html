@@ -242,6 +242,16 @@ function MediaAssetCard({asset,onUpdate}){
         }
       </div>
 
+      <!-- Post copy (for social posts with data.topic / data.copy_body) -->
+      ${asset.data?.topic?html`<div style=${{background:C.s2,borderRadius:6,padding:'10px 12px',fontSize:12,marginBottom:10,lineHeight:1.5}}>
+        <div style=${{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:6}}>
+          <span style=${{color:C.ac,fontSize:11,fontWeight:700}}>${asset.data.topic}</span>
+          ${asset.data.scheduled_for?html`<span style=${{color:C.dm,fontSize:10}}>📅 ${asset.data.scheduled_for}</span>`:''}
+        </div>
+        ${asset.data.stat?html`<div style=${{color:C.wn,fontSize:11,fontStyle:'italic',marginBottom:6}}>📊 ${asset.data.stat}</div>`:''}
+        ${asset.data.copy_body?html`<div style=${{color:C.tx,fontSize:12,lineHeight:1.6,whiteSpace:'pre-wrap'}}>${asset.data.copy_body}</div>`:''}
+      </div>`:''}
+
       <!-- Prompt used -->
       ${asset.prompt?html`<div style=${{background:C.s2,borderRadius:6,padding:'8px 10px',fontSize:11,color:C.dm,lineHeight:1.6,marginBottom:10}}>
         <span style=${{color:C.mt,fontSize:10,textTransform:'uppercase',letterSpacing:'0.5px',display:'block',marginBottom:3}}>AI Prompt</span>
