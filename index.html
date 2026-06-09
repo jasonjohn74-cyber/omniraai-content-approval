@@ -146,7 +146,10 @@ function MediaAssetCard({asset,onUpdate}){
   const[regenerating,setRegenerating]=useState(false);
   const[uploading,setUploading]=useState(false);
   const[imgError,setImgError]=useState(false);
+  const[referenceImage,setReferenceImage]=useState(null);
+  const[refDragging,setRefDragging]=useState(false);
   const fileRef=useRef(null);
+  const refInputRef=useRef(null);
 
   const ch=CHANNEL_META[asset.channel]||{icon:'🖼',label:asset.channel,dims:'',type:'image'};
   const isVideo=asset.asset_type==='video'||asset.asset_url?.match(/\.(mp4|mov|webm)/i);
@@ -169,17 +172,54 @@ function MediaAssetCard({asset,onUpdate}){
   async function doReject(){
     await onUpdate({...asset,status:'rejected',feedback:feedback||null});
   }
+  function handleRefFiles(files){
+    const file=[...files].find(f=>f.type.startsWith('image/'));
+    if(!file)return;
+    // Resize large images to max 1024px before encoding (keeps payload small)
+    const reader=new FileReader();
+    reader.onload=e=>{
+      const img=new Image();
+      img.onload=()=>{
+        const MAX=1024;
+        let{width:w,height:h}=img;
+        if(w>MAX||h>MAX){const s=Math.min(MAX/w,MAX/h);w=Math.round(w*s);h=Math.round(h*s);}
+        const canvas=document.createElement('canvas');
+        canvas.width=w;canvas.height=h;
+        canvas.getContext('2d').drawImage(img,0,0,w,h);
+        setReferenceImage(canvas.toDataURL('image/jpeg',0.85));
+      };
+      img.src=e.target.result;
+    };
+    reader.readAsDataURL(file);
+  }
+  function handleRefDrop(e){
+    e.preventDefault();setRefDragging(false);
+    handleRefFiles(e.dataTransfer.files);
+  }
+  function handleRefPaste(e){
+    const items=e.clipboardData?.items;
+    if(!items)return;
+    const imgItem=[...items].find(i=>i.type.startsWith('image/'));
+    if(imgItem){e.preventDefault();handleRefFiles([imgItem.getAsFile()]);}
+  }
+
   async function doRequestRevision(){
     if(!feedback.trim()){alert('Add feedback so AI knows what to change.');return;}
     setRegenerating(true);
     const updated={...asset,status:'revision_requested',feedback,revision_round:(asset.revision_round||1)+1};
     await onUpdate(updated);
-    // Trigger n8n to regenerate
+    // Trigger n8n to regenerate — include reference image if provided
     try{
       await fetch(`${N8N}/webhook/regenerate-asset`,{
         method:'POST',headers:{'Content-Type':'application/json'},
-        body:JSON.stringify({asset_id:asset.id,feedback,channel:asset.channel,format:asset.format,prompt:asset.prompt,asset_type:asset.asset_type,revision_round:updated.revision_round})
+        body:JSON.stringify({
+          asset_id:asset.id,feedback,channel:asset.channel,format:asset.format,
+          prompt:asset.prompt,asset_type:asset.asset_type,
+          revision_round:updated.revision_round,
+          reference_image:referenceImage||null
+        })
       });
+      setReferenceImage(null);
     }catch(e){console.error('Regeneration trigger failed:',e);}
     setRegenerating(false);
   }
@@ -296,15 +336,45 @@ function MediaAssetCard({asset,onUpdate}){
           placeholder="Feedback for revision (required when requesting changes)…"
           value=${feedback}
           onInput=${e=>setFeedback(e.target.value)}
+          onPaste=${handleRefPaste}
           style=${{background:C.s2,border:`0.5px solid ${C.bd}`,borderRadius:6,color:C.tx,padding:'8px 11px',fontSize:12,width:'100%',resize:'vertical',minHeight:56,outline:'none',marginBottom:10,lineHeight:1.5}}
         />
+
+        <!-- Reference image zone -->
+        <input ref=${refInputRef} type="file" accept="image/*" onChange=${e=>handleRefFiles(e.target.files)} style=${{display:'none'}} />
+        ${referenceImage
+          ?html`<div style=${{marginBottom:10,border:`0.5px solid ${C.pu}40`,borderRadius:6,overflow:'hidden',position:'relative'}}>
+            <div style=${{background:`${C.pu}15`,padding:'6px 10px',display:'flex',alignItems:'center',justifyContent:'space-between'}}>
+              <span style=${{color:C.pu,fontSize:11,fontWeight:600}}>📎 Reference image attached</span>
+              <button onClick=${()=>setReferenceImage(null)} style=${{background:'transparent',border:'none',color:C.pu,cursor:'pointer',fontSize:13,padding:'0 4px'}}>✕ Remove</button>
+            </div>
+            <img src=${referenceImage} style=${{width:'100%',maxHeight:180,objectFit:'contain',background:C.s2,display:'block'}} />
+          </div>`
+          :html`<div
+            onDragOver=${e=>{e.preventDefault();setRefDragging(true);}}
+            onDragLeave=${()=>setRefDragging(false)}
+            onDrop=${handleRefDrop}
+            onClick=${()=>refInputRef.current?.click()}
+            style=${{
+              border:`1px dashed ${refDragging?C.pu:C.bd}`,
+              background:refDragging?`${C.pu}08`:'transparent',
+              borderRadius:6,padding:'10px 14px',marginBottom:10,
+              cursor:'pointer',textAlign:'center',
+              transition:'border-color 0.15s, background 0.15s'
+            }}>
+            <span style=${{color:refDragging?C.pu:C.mt,fontSize:11}}>
+              📎 Drag & drop a reference image, paste (Ctrl+V), or click to browse
+            </span>
+          </div>`
+        }
+
         <div style=${{display:'flex',gap:8,flexWrap:'wrap'}}>
           <button onClick=${doApprove} style=${{background:C.ok,color:'#0a1a0a',border:'none',borderRadius:6,padding:'8px 18px',fontSize:13,fontWeight:700,cursor:'pointer'}}>
             ✓ Approve
           </button>
           <button onClick=${doRequestRevision} disabled=${regenerating}
             style=${{background:regenerating?`${C.pu}20`:'transparent',color:C.pu,border:`0.5px solid ${C.pu}`,borderRadius:6,padding:'8px 14px',fontSize:13,cursor:regenerating?'default':'pointer'}}>
-            ${regenerating?'🤖 Regenerating…':'✏ Request AI Revision'}
+            ${regenerating?'🤖 Regenerating…':`✏ Request AI Revision${referenceImage?' + Ref':''}`}
           </button>
           <button onClick=${doReject}
             style=${{background:'transparent',color:C.er,border:`0.5px solid ${C.er}`,borderRadius:6,padding:'8px 14px',fontSize:13,cursor:'pointer'}}>
