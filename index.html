@@ -148,6 +148,9 @@ function MediaAssetCard({asset,onUpdate}){
   const[imgError,setImgError]=useState(false);
   const[referenceImage,setReferenceImage]=useState(null);
   const[refDragging,setRefDragging]=useState(false);
+  const[editingPrompt,setEditingPrompt]=useState(false);
+  const[editedPrompt,setEditedPrompt]=useState(asset.prompt||'');
+  const[restoring,setRestoring]=useState(false);
   const fileRef=useRef(null);
   const refInputRef=useRef(null);
 
@@ -223,6 +226,32 @@ function MediaAssetCard({asset,onUpdate}){
     }catch(e){console.error('Regeneration trigger failed:',e);}
     setRegenerating(false);
   }
+  async function doRegenerateWithPrompt(){
+    if(!editedPrompt.trim()){alert('Prompt is empty.');return;}
+    setRegenerating(true);
+    const updated={...asset,status:'revision_requested',revision_round:(asset.revision_round||1)+1};
+    await onUpdate(updated);
+    try{
+      await fetch(`${N8N}/webhook/regenerate-asset`,{
+        method:'POST',headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({
+          asset_id:asset.id,prompt:editedPrompt,use_prompt_as_is:true,
+          revision_round:updated.revision_round,
+          feedback:'[Direct prompt edit by user]'
+        })
+      });
+      setEditingPrompt(false);
+    }catch(e){console.error('Direct regen failed:',e);}
+    setRegenerating(false);
+  }
+  async function doRestoreVersion(rev){
+    if(!rev.asset_url)return;
+    if(!confirm(`Restore v${rev.revision_number}? Current image will be replaced.`))return;
+    setRestoring(true);
+    await onUpdate({...asset,asset_url:rev.asset_url,prompt:rev.prompt||asset.prompt,status:'pending_review'});
+    setImgError(false);
+    setRestoring(false);
+  }
   async function doPublish(){
     await onUpdate({...asset,status:'published',published_at:now()});
   }
@@ -292,10 +321,26 @@ function MediaAssetCard({asset,onUpdate}){
         ${asset.data.copy_body?html`<div style=${{color:C.tx,fontSize:12,lineHeight:1.6,whiteSpace:'pre-wrap'}}>${asset.data.copy_body}</div>`:''}
       </div>`:''}
 
-      <!-- Prompt used -->
+      <!-- Prompt editor -->
       ${asset.prompt?html`<div style=${{background:C.s2,borderRadius:6,padding:'8px 10px',fontSize:11,color:C.dm,lineHeight:1.6,marginBottom:10}}>
-        <span style=${{color:C.mt,fontSize:10,textTransform:'uppercase',letterSpacing:'0.5px',display:'block',marginBottom:3}}>AI Prompt</span>
-        ${asset.prompt}
+        <div style=${{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:editingPrompt?6:3}}>
+          <span style=${{color:C.mt,fontSize:10,textTransform:'uppercase',letterSpacing:'0.5px'}}>AI Prompt</span>
+          <button onClick=${()=>{setEditingPrompt(!editingPrompt);setEditedPrompt(asset.prompt||'');}}
+            style=${{background:'transparent',border:`0.5px solid ${editingPrompt?C.er:C.ac}40`,borderRadius:4,color:editingPrompt?C.er:C.ac,fontSize:10,cursor:'pointer',padding:'2px 8px',transition:'all 0.15s'}}>
+            ${editingPrompt?'↩ Cancel':'✏️ Edit Directly'}
+          </button>
+        </div>
+        ${editingPrompt
+          ?html`<textarea value=${editedPrompt} onInput=${e=>setEditedPrompt(e.target.value)}
+              rows=5
+              style=${{background:C.s3,border:`1px solid ${C.ac}`,borderRadius:4,color:C.tx,padding:'7px 9px',fontSize:11,width:'100%',resize:'vertical',outline:'none',lineHeight:1.5,marginBottom:6,boxSizing:'border-box'}}
+            ></textarea>
+            <button onClick=${doRegenerateWithPrompt} disabled=${regenerating}
+              style=${{background:regenerating?`${C.ac}30`:C.ac,color:regenerating?C.ac:'#fff',border:'none',borderRadius:6,padding:'7px 14px',fontSize:12,fontWeight:700,cursor:regenerating?'default':'pointer',width:'100%',transition:'all 0.15s'}}>
+              ${regenerating?'🤖 Generating…':'🎨 Regenerate with This Exact Prompt (no AI rewrite)'}
+            </button>`
+          :html`<div style=${{wordBreak:'break-word'}}>${asset.prompt}</div>`
+        }
       </div>`:''}
 
       <!-- Manual upload override -->
@@ -318,13 +363,21 @@ function MediaAssetCard({asset,onUpdate}){
             ?html`<${Spinner} msg="Loading history…"/>`
             :revisions.length===0
               ?html`<div style=${{color:C.mt,fontSize:12}}>No revisions yet.</div>`
-              :revisions.map((rev,i)=>html`<div key=${i} style=${{borderBottom:i<revisions.length-1?`0.5px solid ${C.bd}`:'none',paddingBottom:8,marginBottom:8}}>
-                <div style=${{display:'flex',justifyContent:'space-between',marginBottom:4}}>
-                  <span style=${{color:C.ac,fontSize:11}}>v${rev.revision_number} · ${rev.source||'ai_generated'} · ${rev.provider||'?'}</span>
+              :revisions.map((rev,i)=>html`<div key=${i} style=${{borderBottom:i<revisions.length-1?`0.5px solid ${C.bd}`:'none',paddingBottom:10,marginBottom:10}}>
+                <div style=${{display:'flex',justifyContent:'space-between',marginBottom:3}}>
+                  <span style=${{color:C.ac,fontSize:11,fontWeight:600}}>v${rev.revision_number}</span>
                   <span style=${{color:C.mt,fontSize:10}}>${fmtdt(rev.created_at)}</span>
                 </div>
-                ${rev.feedback?html`<div style=${{color:C.dm,fontSize:11,fontStyle:'italic',marginBottom:4}}>"${rev.feedback}"</div>`:''}
-                ${rev.asset_url?html`<img src=${rev.asset_url} style=${{width:'100%',maxHeight:100,objectFit:'contain',borderRadius:4,background:C.s2,display:'block'}} />`:''}
+                <div style=${{color:C.mt,fontSize:10,marginBottom:3}}>${rev.source||'ai_generated'} · ${(rev.provider||'?').split('/').pop()}</div>
+                ${rev.feedback&&rev.feedback!=='[Direct prompt edit by user]'?html`<div style=${{color:C.dm,fontSize:11,fontStyle:'italic',marginBottom:4}}>"${rev.feedback}"</div>`:''}
+                ${rev.prompt?html`<div style=${{color:C.mt,fontSize:10,fontStyle:'italic',marginBottom:4,wordBreak:'break-word',lineHeight:1.4}}>${rev.prompt.slice(0,100)}${rev.prompt.length>100?'…':''}</div>`:''}
+                ${rev.asset_url?html`<div>
+                  <img src=${rev.asset_url} style=${{width:'100%',maxHeight:120,objectFit:'contain',borderRadius:4,background:C.s2,display:'block',marginBottom:5}} />
+                  <button onClick=${()=>doRestoreVersion(rev)} disabled=${restoring}
+                    style=${{background:'transparent',border:`0.5px solid ${C.or}`,borderRadius:4,color:C.or,fontSize:11,cursor:restoring?'default':'pointer',padding:'4px 10px',width:'100%',transition:'all 0.15s'}}>
+                    ${restoring?'⏳ Restoring…':'↩ Use This Version'}
+                  </button>
+                </div>`:''}
               </div>`)
           }
         </div>`}
