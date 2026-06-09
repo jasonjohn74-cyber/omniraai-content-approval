@@ -1035,22 +1035,28 @@ function ArchiveTab({archive,onPurge}){
 }
 
 // ── SCHEDULE TAB ─────────────────────────────────────────────
-function ScheduleTab({schedule}){
+function ScheduleTab({schedule,clients,schedClientMap}){
   const[l1,setL1]=useState('all');
   const[l2,setL2]=useState('all');
+  const[filterClient,setFilterClient]=useState('all');
   const now=new Date();
   const daysAway=d=>Math.ceil((new Date(d)-now)/(1000*60*60*24));
 
-  // Resolve which content_types to show based on l1 + l2
   const ctFilter=resolveCtFilter(l1,l2);
   const matchesCt=s=>{
     if(ctFilter==='all')return true;
     if(ctFilter==='tdow')return s.content_type==='email'||s.content_type==='social';
     return s.content_type===ctFilter;
   };
+  const matchesClient=s=>{
+    if(filterClient==='all')return true;
+    const cid=(schedClientMap||{})[s.id];
+    if(!cid)return true; // no mapping yet → show under all clients
+    return cid===filterClient;
+  };
 
   const valid=schedule.filter(s=>s.scheduled_for);
-  const filtered=valid.filter(matchesCt);
+  const filtered=valid.filter(s=>matchesCt(s)&&matchesClient(s));
   const upcoming=filtered.filter(s=>s.status!=='published'&&new Date(s.scheduled_for)>=now)
     .sort((a,b)=>new Date(a.scheduled_for)-new Date(b.scheduled_for));
   const past=filtered.filter(s=>s.status==='published'||new Date(s.scheduled_for)<now)
@@ -1090,6 +1096,15 @@ function ScheduleTab({schedule}){
   }
 
   return html`<div>
+    <!-- Client filter -->
+    <div style=${{display:'flex',alignItems:'center',gap:10,marginBottom:18}}>
+      <label style=${{color:'#5a8ab0',fontSize:11,fontWeight:700,textTransform:'uppercase',letterSpacing:'0.5px',whiteSpace:'nowrap'}}>Client</label>
+      <select value=${filterClient} onChange=${e=>setFilterClient(e.target.value)}
+        style=${{background:'#0a1020',color:'#c8d8e8',border:'0.5px solid #17304e',borderRadius:8,padding:'7px 12px',fontSize:13,flex:1,maxWidth:260}}>
+        <option value="all">All Clients</option>
+        ${(clients||[]).map(c=>html`<option key=${c.id} value=${c.id}>${c.basics?.brandName||c.basics?.clientName||c.id}</option>`)}
+      </select>
+    </div>
     <!-- Level 1: Campaign -->
     <div style=${{marginBottom:8,color:'#5a8ab0',fontSize:10,fontWeight:700,textTransform:'uppercase',letterSpacing:'1px'}}>Campaign</div>
     <div style=${{display:'flex',gap:6,marginBottom:12,flexWrap:'wrap'}}>
@@ -1173,6 +1188,7 @@ function App(){
   const[rgSchedule,setRgSchedule]=useState({});
   const[deployments,setDeployments]=useState({approvals:[],assets:[]});
   const[archive,setArchive]=useState([]);
+  const[schedClientMap,setSchedClientMap]=useState({});
 
   const loadData=useCallback(async(silent=false)=>{
     if(!silent)setLoading(true);
@@ -1186,6 +1202,15 @@ function App(){
       }
     });
     setRgSchedule(rgMap);
+    // Build ca_id → client_id map for Schedule tab client filtering
+    const caMap={};
+    sched.filter(s=>s.content_type==='real_gains').forEach(s=>{
+      if(s.full_content?.asset_id){
+        const asset=m.find(a=>a.id===s.full_content.asset_id);
+        if(asset?.client_id)caMap[s.id]=asset.client_id;
+      }
+    });
+    setSchedClientMap(caMap);
     setLastRefresh(new Date());
     if(!silent)setLoading(false);
   },[]);
@@ -1378,7 +1403,7 @@ function App(){
           :activeTab==='deployments'
           ?html`<${DeploymentTab} deployments=${deployments} clients=${clients} />`
           :activeTab==='schedule'
-          ?html`<${ScheduleTab} schedule=${schedule} />`
+          ?html`<${ScheduleTab} schedule=${schedule} clients=${clients} schedClientMap=${schedClientMap} />`
           :/* activeTab === 'content' */
             html`<div>
               ${pendingArchiveCleanup>0&&html`<div style=${{background:'rgba(45,212,191,0.07)',border:'0.5px solid rgba(45,212,191,0.25)',borderRadius:8,padding:'10px 16px',marginBottom:16,display:'flex',alignItems:'center',gap:12}}>
