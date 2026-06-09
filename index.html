@@ -96,6 +96,13 @@ const db={
       console.log('content_approvals synced:',linked.id,'→',caStatus);
     }catch(e){console.error('syncContentApproval error:',e);}
   },
+  async getContentSchedule(){
+    try{
+      const r=await fetch(`${SB_URL}/rest/v1/content_approvals?select=id,content_type,week_number,subject,status,scheduled_for,full_content&order=scheduled_for.asc`,{headers:SBH});
+      const d=await r.json();
+      return Array.isArray(d)?d:[];
+    }catch{return[];}
+  },
   async uploadToStorage(file,path){
     try{
       const r=await fetch(`${SB_URL}/storage/v1/object/campaign-assets/${path}`,{
@@ -158,7 +165,7 @@ function Badge({status}){
 }
 
 // ── MEDIA ASSET CARD ─────────────────────────────────────────
-function MediaAssetCard({asset,onUpdate}){
+function MediaAssetCard({asset,onUpdate,weekInfo}){
   const[feedback,setFeedback]=useState(asset.feedback||'');
   const[revisions,setRevisions]=useState([]);
   const[showHistory,setShowHistory]=useState(false);
@@ -298,6 +305,13 @@ function MediaAssetCard({asset,onUpdate}){
   }
 
   return html`<div style=${{background:C.s1,border:`0.5px solid ${borderColor}`,borderRadius:10,marginBottom:12,overflow:'hidden',animation:'fadeIn 0.2s ease'}}>
+
+    ${weekInfo&&html`<div style=${{background:'rgba(74,134,245,0.07)',borderBottom:`0.5px solid rgba(74,134,245,0.18)`,padding:'7px 14px',display:'flex',alignItems:'center',justifyContent:'space-between'}}>
+      <span style=${{color:C.ac,fontWeight:700,fontSize:12,letterSpacing:'0.2px'}}>📅 WEEK ${weekInfo.week_number}</span>
+      <span style=${{color:weekInfo.ca_status==='approved'?C.ok:weekInfo.ca_status==='published'?C.tl:C.dm,fontSize:11}}>
+        ${weekInfo.ca_status==='approved'?'✓ Approved · ':weekInfo.ca_status==='published'?'🚀 Published · ':'⏳ Pending · '}Fri ${new Date(weekInfo.scheduled_for).toLocaleDateString('en-MY',{day:'numeric',month:'short',year:'numeric'})}
+      </span>
+    </div>`}
 
     <!-- Header -->
     <div style=${{padding:'11px 14px',display:'flex',justifyContent:'space-between',alignItems:'center',gap:10,borderBottom:`0.5px solid ${C.bd}`}}>
@@ -645,6 +659,119 @@ function CopyContentCard({item,onUpdate,onDelete,busy}){
   </div>`;
 }
 
+// ── SCHEDULE TAB ─────────────────────────────────────────────
+const CA_STATUS_MAP={
+  pending:     {l:'Pending Approval',c:'#fbbf24',icon:'⏳'},
+  approved:    {l:'Approved',        c:'#34d399',icon:'✓'},
+  published:   {l:'Published',       c:'#2dd4bf',icon:'🚀'},
+  skipped:     {l:'Skipped',         c:'#f87171',icon:'✗'},
+  revision_requested:{l:'Revision',  c:'#a78bfa',icon:'✏️'},
+  awaiting_revision: {l:'In Revision',c:'#a78bfa',icon:'✏️'},
+  held:        {l:'On Hold',         c:'#5a8ab0',icon:'⏸'},
+};
+const CT_META={
+  email:      {icon:'📧',label:'Drill Email',    color:'#4a86f5'},
+  social:     {icon:'📸📘',label:'Social Post',  color:'#fb923c'},
+  real_gains: {icon:'🏓',label:'Real Gains Post',color:'#2dd4bf'},
+};
+function ScheduleTab({schedule}){
+  const now=new Date();
+  const fmtSched=d=>{
+    const dt=new Date(d);
+    const day=dt.toLocaleDateString('en-MY',{weekday:'short',day:'numeric',month:'short',year:'numeric'});
+    const daysAway=Math.ceil((dt-now)/(1000*60*60*24));
+    if(daysAway<0)return day+' (sent)';
+    if(daysAway===0)return day+' (today)';
+    if(daysAway===1)return day+' (tomorrow)';
+    if(daysAway<=7)return day+` (in ${daysAway}d)`;
+    return day;
+  };
+  if(!schedule.length)return html`<div style=${{textAlign:'center',padding:'80px 20px',color:'#274466'}}>
+    <div style=${{fontSize:32,marginBottom:12}}>📅</div>
+    <div>No scheduled content yet.</div>
+  </div>`;
+
+  // Summary stats
+  const types=['email','real_gains','social'];
+  const sent=schedule.filter(s=>new Date(s.scheduled_for)<now||s.status==='published').length;
+  const approved=schedule.filter(s=>s.status==='approved').length;
+  const pending=schedule.filter(s=>s.status==='pending').length;
+  const total=schedule.length;
+
+  return html`<div>
+    <!-- Summary bar -->
+    <div style=${{display:'flex',gap:10,marginBottom:20,flexWrap:'wrap'}}>
+      ${types.map(ct=>{
+        const items=schedule.filter(s=>s.content_type===ct);
+        if(!items.length)return null;
+        const m=CT_META[ct]||{icon:'📄',label:ct,color:'#5a8ab0'};
+        const app=items.filter(s=>s.status==='approved'||s.status==='published').length;
+        const pend=items.filter(s=>s.status==='pending').length;
+        return html`<div key=${ct} style=${{background:'#0a1020',border:`0.5px solid ${m.color}30`,borderRadius:8,padding:'10px 16px',flex:1,minWidth:160}}>
+          <div style=${{fontSize:13,fontWeight:600,color:'#cfe0f5',marginBottom:3}}>${m.icon} ${m.label}</div>
+          <div style=${{fontSize:11,color:'#5a8ab0'}}>${app}/${items.length} approved${pend>0?` · ${pend} need review`:''}</div>
+        </div>`;
+      })}
+      <div style=${{background:'#0a1020',border:'0.5px solid #17304e',borderRadius:8,padding:'10px 16px',flex:1,minWidth:160}}>
+        <div style=${{fontSize:13,fontWeight:600,color:'#cfe0f5',marginBottom:3}}>📊 Total</div>
+        <div style=${{fontSize:11,color:'#5a8ab0'}}>${total} items · ${sent} sent · ${pending} pending review</div>
+      </div>
+    </div>
+
+    <!-- Section: Upcoming -->
+    <div style=${{marginBottom:6,color:'#4a86f5',fontWeight:700,fontSize:11,textTransform:'uppercase',letterSpacing:'1px'}}>Upcoming Content</div>
+    ${schedule.filter(s=>new Date(s.scheduled_for)>=now&&s.status!=='published').map((item,i)=>{
+      const m=CT_META[item.content_type]||{icon:'📄',label:item.content_type,color:'#5a8ab0'};
+      const st=CA_STATUS_MAP[item.status]||{l:item.status,c:'#5a8ab0',icon:''};
+      const urgency=Math.ceil((new Date(item.scheduled_for)-now)/(1000*60*60*24));
+      const isUrgent=urgency<=3&&item.status==='pending';
+      return html`<div key=${item.id} style=${{
+        background:'#0a1020',
+        border:`0.5px solid ${isUrgent?'rgba(251,191,36,0.5)':item.status==='approved'?'rgba(52,211,153,0.25)':'#17304e'}`,
+        borderRadius:8,padding:'11px 16px',marginBottom:6,
+        display:'flex',alignItems:'center',justifyContent:'space-between',gap:12,flexWrap:'wrap'
+      }}>
+        <div style=${{display:'flex',alignItems:'center',gap:12,flex:1,minWidth:0}}>
+          <div style=${{textAlign:'center',minWidth:36,flexShrink:0}}>
+            <div style=${{fontWeight:800,fontSize:14,color:m.color}}>Wk${item.week_number}</div>
+            <div style=${{fontSize:10,color:'#274466'}}>${m.icon}</div>
+          </div>
+          <div style=${{flex:1,minWidth:0}}>
+            <div style=${{color:'#cfe0f5',fontSize:13,fontWeight:500,marginBottom:2,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>${(item.subject||'').replace(/^🏓 .*?:\s*/,'').replace(/^📧 .*?:\s*/,'')}</div>
+            <div style=${{color:'#5a8ab0',fontSize:11}}>${m.label} · 📅 ${fmtSched(item.scheduled_for)}</div>
+          </div>
+        </div>
+        <div style=${{display:'flex',alignItems:'center',gap:6,flexShrink:0}}>
+          ${isUrgent?html`<span style=${{background:'rgba(251,191,36,0.15)',color:'#fbbf24',border:'0.5px solid rgba(251,191,36,0.4)',borderRadius:12,padding:'2px 8px',fontSize:10,fontWeight:700}}>⚡ SOON</span>`:''}
+          <span style=${{background:`${st.c}18`,color:st.c,border:`0.5px solid ${st.c}40`,borderRadius:20,padding:'3px 10px',fontSize:11,fontWeight:600,whiteSpace:'nowrap'}}>${st.icon} ${st.l}</span>
+        </div>
+      </div>`;
+    })}
+
+    <!-- Section: Sent/Published -->
+    ${schedule.filter(s=>new Date(s.scheduled_for)<now||s.status==='published').length>0&&html`
+      <div style=${{marginTop:24,marginBottom:6,color:'#274466',fontWeight:700,fontSize:11,textTransform:'uppercase',letterSpacing:'1px'}}>Already Sent / Published</div>
+      ${schedule.filter(s=>new Date(s.scheduled_for)<now||s.status==='published').map(item=>{
+        const m=CT_META[item.content_type]||{icon:'📄',label:item.content_type,color:'#5a8ab0'};
+        const st=CA_STATUS_MAP[item.status]||{l:item.status,c:'#5a8ab0',icon:''};
+        return html`<div key=${item.id} style=${{background:'#0a1020',border:'0.5px solid #13213e',borderRadius:8,padding:'10px 16px',marginBottom:5,display:'flex',alignItems:'center',justifyContent:'space-between',gap:12,opacity:0.65,flexWrap:'wrap'}}>
+          <div style=${{display:'flex',alignItems:'center',gap:10,flex:1,minWidth:0}}>
+            <div style=${{minWidth:36,flexShrink:0}}>
+              <div style=${{fontWeight:700,fontSize:13,color:'#274466'}}>Wk${item.week_number}</div>
+              <div style=${{fontSize:10,color:'#1a3055'}}>${m.icon}</div>
+            </div>
+            <div style=${{flex:1,minWidth:0}}>
+              <div style=${{color:'#5a8ab0',fontSize:12,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>${(item.subject||'').replace(/^[^\s]+ [^:]+:\s*/,'')}</div>
+              <div style=${{color:'#274466',fontSize:10}}>${m.label} · ${fmtSched(item.scheduled_for)}</div>
+            </div>
+          </div>
+          <span style=${{color:st.c,fontSize:11,fontWeight:600,whiteSpace:'nowrap'}}>${st.icon} ${st.l}</span>
+        </div>`;
+      })}
+    `}
+  </div>`;
+}
+
 // ── MAIN APP ─────────────────────────────────────────────────
 function App(){
   const[activeTab,setActiveTab]=useState('copy');
@@ -656,11 +783,21 @@ function App(){
   const[filterStatus,setFilterStatus]=useState('pending_review');
   const[filterClient,setFilterClient]=useState('all');
   const[lastRefresh,setLastRefresh]=useState(null);
+  const[schedule,setSchedule]=useState([]);
+  const[rgSchedule,setRgSchedule]=useState({});
 
   const loadData=useCallback(async(silent=false)=>{
     if(!silent)setLoading(true);
-    const[q,c,m]=await Promise.all([db.getQueue(),db.getClients(),db.getMediaAssets()]);
-    setCopyItems(q);setClients(c);setMediaAssets(m);
+    const[q,c,m,sched]=await Promise.all([db.getQueue(),db.getClients(),db.getMediaAssets(),db.getContentSchedule()]);
+    setCopyItems(q);setClients(c);setMediaAssets(m);setSchedule(sched);
+    // Build week-number + scheduled_for map keyed by campaign_asset id (for Real Gains)
+    const rgMap={};
+    sched.filter(s=>s.content_type==='real_gains').forEach(s=>{
+      if(s.full_content?.asset_id){
+        rgMap[s.full_content.asset_id]={week_number:s.week_number,scheduled_for:s.scheduled_for,ca_status:s.status};
+      }
+    });
+    setRgSchedule(rgMap);
     setLastRefresh(new Date());
     if(!silent)setLoading(false);
   },[]);
@@ -703,6 +840,13 @@ function App(){
     if(filterStatus!=='all'&&asset.status!==filterStatus)return false;
     if(filterClient!=='all'&&asset.client_id!==filterClient)return false;
     return true;
+  }).sort((a,b)=>{
+    // Real Gains assets: sort by week_number (earliest = most urgent first)
+    const wa=rgSchedule[a.id]?.week_number,wb=rgSchedule[b.id]?.week_number;
+    if(wa&&wb)return wa-wb;
+    if(wa)return -1; // Real Gains floats to top
+    if(wb)return 1;
+    return new Date(a.created_at)-new Date(b.created_at);
   });
 
   const counts=activeTab==='copy'?copyCounts:mediaCounts;
@@ -745,6 +889,9 @@ function App(){
           🖼 Media Assets
           ${pendingMedia>0?html`<span style=${{position:'absolute',top:-6,right:-6,background:C.wn,color:'#0a0a00',borderRadius:10,padding:'1px 6px',fontSize:10,fontWeight:700}}>${pendingMedia}</span>`:''}
         </button>
+        <button onClick=${()=>setActiveTab('schedule')} style=${{background:activeTab==='schedule'?C.tl:C.s1,color:activeTab==='schedule'?'#001a18':C.dm,border:`0.5px solid ${activeTab==='schedule'?C.tl:C.bd}`,borderRadius:8,padding:'9px 20px',fontSize:14,fontWeight:600,cursor:'pointer'}}>
+          📅 Schedule
+        </button>
       </div>
 
       <!-- Stats row -->
@@ -773,25 +920,27 @@ function App(){
       <!-- Content -->
       ${loading
         ?html`<${Spinner}/>`
-        :activeTab==='copy'
-          ?(filteredCopy.length===0
-            ?html`<div style=${{textAlign:'center',padding:'80px 20px',color:C.mt}}>
-              <div style=${{fontSize:32,marginBottom:12}}>${copyItems.length===0?'📭':'🔍'}</div>
-              <div style=${{fontSize:14}}>${copyItems.length===0?'Copy queue is empty':'No copy matches current filters'}</div>
-            </div>`
-            :filteredCopy.map(item=>html`<${CopyContentCard} key=${item.id} item=${item} onUpdate=${handleCopyUpdate} onDelete=${handleCopyDelete} busy=${!!busy[item.id]} />`))
-          :(filteredMedia.length===0
-            ?html`<div style=${{textAlign:'center',padding:'80px 20px',color:C.mt}}>
-              <div style=${{fontSize:32,marginBottom:12}}>${mediaAssets.length===0?'🖼':'🔍'}</div>
-              <div style=${{fontSize:14,marginBottom:8}}>${mediaAssets.length===0?'No media assets yet':'No assets match current filters'}</div>
-              ${mediaAssets.length===0?html`<div style=${{fontSize:12,color:C.bd,maxWidth:400,margin:'0 auto',lineHeight:1.6}}>
-                Media assets will appear here once a campaign brief triggers the AI generation pipeline.<br/>
-                Add your Fal.ai API key in Supabase settings to enable automatic generation.
-              </div>`:''}
-            </div>`
-            :html`<div style=${{display:'grid',gridTemplateColumns:'repeat(auto-fill,minmax(340px,1fr))',gap:16}}>
-              ${filteredMedia.map(asset=>html`<${MediaAssetCard} key=${asset.id} asset=${asset} onUpdate=${handleAssetUpdate} />`)}
-            </div>`)
+        :activeTab==='schedule'
+          ?html`<${ScheduleTab} schedule=${schedule} />`
+          :activeTab==='copy'
+            ?(filteredCopy.length===0
+              ?html`<div style=${{textAlign:'center',padding:'80px 20px',color:C.mt}}>
+                <div style=${{fontSize:32,marginBottom:12}}>${copyItems.length===0?'📭':'🔍'}</div>
+                <div style=${{fontSize:14}}>${copyItems.length===0?'Copy queue is empty':'No copy matches current filters'}</div>
+              </div>`
+              :filteredCopy.map(item=>html`<${CopyContentCard} key=${item.id} item=${item} onUpdate=${handleCopyUpdate} onDelete=${handleCopyDelete} busy=${!!busy[item.id]} />`))
+            :(filteredMedia.length===0
+              ?html`<div style=${{textAlign:'center',padding:'80px 20px',color:C.mt}}>
+                <div style=${{fontSize:32,marginBottom:12}}>${mediaAssets.length===0?'🖼':'🔍'}</div>
+                <div style=${{fontSize:14,marginBottom:8}}>${mediaAssets.length===0?'No media assets yet':'No assets match current filters'}</div>
+                ${mediaAssets.length===0?html`<div style=${{fontSize:12,color:C.bd,maxWidth:400,margin:'0 auto',lineHeight:1.6}}>
+                  Media assets will appear here once a campaign brief triggers the AI generation pipeline.<br/>
+                  Add your Fal.ai API key in Supabase settings to enable automatic generation.
+                </div>`:''}
+              </div>`
+              :html`<div style=${{display:'grid',gridTemplateColumns:'repeat(auto-fill,minmax(340px,1fr))',gap:16}}>
+                ${filteredMedia.map(asset=>html`<${MediaAssetCard} key=${asset.id} asset=${asset} weekInfo=${rgSchedule[asset.id]||null} onUpdate=${handleAssetUpdate} />`)}
+              </div>`)
       }
     </div>
   </div>`;
