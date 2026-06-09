@@ -76,6 +76,26 @@ const db={
   async getAssetRevisions(assetId){
     try{const r=await fetch(`${SB_URL}/rest/v1/asset_revisions?asset_id=eq.${assetId}&order=revision_number.desc`,{headers:SBH});return await r.json();}catch{return[];}
   },
+  // Sync asset approval status back to content_approvals (for real_gains series)
+  async syncContentApproval(assetId, status){
+    try{
+      const statusMap={approved:'approved',rejected:'skipped',revision_requested:'revision_requested'};
+      const caStatus=statusMap[status];
+      if(!caStatus)return;
+      const r=await fetch(`${SB_URL}/rest/v1/content_approvals?content_type=eq.real_gains&select=id,full_content`,{headers:SBH});
+      const d=await r.json();
+      if(!Array.isArray(d))return;
+      const linked=d.find(a=>a.full_content?.asset_id===assetId);
+      if(!linked)return;
+      const patch={status:caStatus,updated_at:new Date().toISOString()};
+      if(caStatus==='approved')patch.approved_at=new Date().toISOString();
+      await fetch(`${SB_URL}/rest/v1/content_approvals?id=eq.${linked.id}`,{
+        method:'PATCH',headers:{...SBH,'Prefer':'return=minimal'},
+        body:JSON.stringify(patch)
+      });
+      console.log('content_approvals synced:',linked.id,'→',caStatus);
+    }catch(e){console.error('syncContentApproval error:',e);}
+  },
   async uploadToStorage(file,path){
     try{
       const r=await fetch(`${SB_URL}/storage/v1/object/campaign-assets/${path}`,{
@@ -661,6 +681,10 @@ function App(){
   }
   async function handleAssetUpdate(asset){
     await db.updateAsset(asset);
+    // Sync status to content_approvals for real_gains series
+    if(['approved','rejected','revision_requested'].includes(asset.status)){
+      await db.syncContentApproval(asset.id, asset.status);
+    }
     setMediaAssets(prev=>prev.map(a=>a.id===asset.id?asset:a));
   }
 
