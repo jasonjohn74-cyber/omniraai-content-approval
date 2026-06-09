@@ -114,6 +114,46 @@ const db={
       return{approvals:Array.isArray(approvals)?approvals:[],assets:Array.isArray(assets)?assets:[]};
     }catch{return{approvals:[],assets:[]};}
   },
+  async getLinkedCA(assetId){
+    try{
+      const r=await fetch(`${SB_URL}/rest/v1/content_approvals?select=*`,{headers:SBH});
+      const d=await r.json();
+      if(!Array.isArray(d))return null;
+      return d.find(ca=>ca.full_content?.asset_id===assetId)||null;
+    }catch{return null;}
+  },
+  async archiveAsset(asset,ca=null){
+    const m=({email:'📧 Email Blast',social:'📸 Instagram · 📘 Facebook',real_gains:'📸 Instagram · 📘 Facebook'})[ca?.content_type||'real_gains']||'';
+    const row={
+      client_id:asset.client_id||null,
+      campaign_id:asset.campaign_id||'unknown',
+      campaign_name:asset.campaign_name||null,
+      content_type:ca?.content_type||'real_gains',
+      week_number:ca?.week_number||null,
+      title:ca?.subject||asset.asset_name||null,
+      channel:m,
+      asset_url:asset.asset_url||null,
+      copy_body:asset.data?.copy_body||null,
+      published_at:asset.published_at||ca?.approved_at||new Date().toISOString(),
+      original_asset_id:asset.id,
+      original_ca_id:ca?.id||null,
+      full_data:{asset,content_approval:ca||null},
+    };
+    try{await fetch(`${SB_URL}/rest/v1/content_archive`,{method:'POST',headers:{...SBH,'Prefer':'return=minimal'},body:JSON.stringify(row)});}
+    catch(e){console.error('archiveAsset error:',e);throw e;}
+  },
+  async deleteAsset(assetId){
+    try{await fetch(`${SB_URL}/rest/v1/campaign_assets?id=eq.${assetId}`,{method:'DELETE',headers:SBH});}
+    catch(e){console.error(e);}
+  },
+  async deleteCA(caId){
+    try{await fetch(`${SB_URL}/rest/v1/content_approvals?id=eq.${caId}`,{method:'DELETE',headers:SBH});}
+    catch(e){console.error(e);}
+  },
+  async getArchive(){
+    try{const r=await fetch(`${SB_URL}/rest/v1/content_archive?select=*&order=published_at.desc`,{headers:SBH});const d=await r.json();return Array.isArray(d)?d:[];}
+    catch{return[];}
+  },
   async uploadToStorage(file,path){
     try{
       const r=await fetch(`${SB_URL}/storage/v1/object/campaign-assets/${path}`,{
@@ -179,7 +219,7 @@ function Badge({status}){
 }
 
 // ── MEDIA ASSET CARD ─────────────────────────────────────────
-function MediaAssetCard({asset,onUpdate,weekInfo}){
+function MediaAssetCard({asset,onUpdate,onArchive,onDelete,weekInfo}){
   const[feedback,setFeedback]=useState(asset.feedback||'');
   const[revisions,setRevisions]=useState([]);
   const[showHistory,setShowHistory]=useState(false);
@@ -501,7 +541,22 @@ function MediaAssetCard({asset,onUpdate,weekInfo}){
         <div style=${{color:'#5a8ab0',fontSize:10,marginTop:6}}>Re-open returns this to Pending so you can revise or regenerate before publishing.</div>
       </div>`}
 
-      ${asset.status==='published'&&html`<div style=${{color:C.tl,fontSize:11,paddingTop:8,borderTop:`0.5px solid ${C.bd}`}}>🚀 Published ${fmtdt(asset.published_at)}</div>`}
+      ${asset.status==='published'&&html`<div style=${{borderTop:`0.5px solid ${C.bd}`,paddingTop:10}}>
+        <div style=${{color:C.tl,fontSize:11,marginBottom:10}}>🚀 Published ${fmtdt(asset.published_at)}</div>
+        ${onArchive&&html`<div style=${{display:'flex',gap:8,alignItems:'center'}}>
+          <button onClick=${()=>onArchive(asset)} style=${{background:'rgba(45,212,191,0.12)',color:C.tl,border:`0.5px solid ${C.tl}55`,borderRadius:6,padding:'7px 14px',fontSize:12,fontWeight:600,cursor:'pointer'}}>
+            📦 Archive & Remove
+          </button>
+          <span style=${{color:'#274466',fontSize:10}}>Saves a permanent record then removes from active pool.</span>
+        </div>`}
+      </div>`}
+
+      ${asset.status==='rejected'&&onDelete&&html`<div style=${{borderTop:`0.5px solid ${C.bd}`,paddingTop:10,display:'flex',gap:8,alignItems:'center'}}>
+        <button onClick=${()=>onDelete(asset)} style=${{background:'rgba(248,113,113,0.1)',color:C.er,border:`0.5px solid ${C.er}55`,borderRadius:6,padding:'7px 14px',fontSize:12,fontWeight:600,cursor:'pointer'}}>
+          🗑️ Delete
+        </button>
+        <span style=${{color:'#274466',fontSize:10}}>Permanently removes this rejected asset.</span>
+      </div>`}
 
     </div>
   </div>`;
@@ -893,6 +948,92 @@ const SCHED_CAMPAIGNS=[
   {k:'real_gains', l:'Real Gains',    icon:'🏓', color:'#2dd4bf'},
 ];
 
+// ── ARCHIVE TAB ──────────────────────────────────────────────
+function ArchiveTab({archive,onPurge}){
+  const[filterCt,setFilterCt]=useState('all');
+  const filtered=filterCt==='all'?archive:archive.filter(r=>r.content_type===filterCt);
+
+  // Group by campaign_id then sort within each group by published_at desc
+  const groups={};
+  filtered.forEach(r=>{
+    const key=r.campaign_id||'unknown';
+    if(!groups[key])groups[key]=[];
+    groups[key].push(r);
+  });
+
+  const ctChips=[
+    {k:'all',l:'All Campaigns',color:'#4a86f5'},
+    {k:'real_gains',l:'🏓 Real Gains',color:'#2dd4bf'},
+    {k:'social',l:'📸📘 TDOW Social',color:'#fb923c'},
+    {k:'email',l:'📧 TDOW Email',color:'#4a86f5'},
+  ];
+  const campaignLabel=r=>r.campaign_name||CAMPAIGN_META[r.content_type]?.campaign||r.campaign_id||'Unknown Campaign';
+  const campaignColor=r=>CAMPAIGN_META[r.content_type]?.color||'#5a8ab0';
+
+  if(!archive.length)return html`<div style=${{textAlign:'center',padding:'80px 20px',color:'#274466'}}>
+    <div style=${{fontSize:32,marginBottom:12}}>📦</div>
+    <div style=${{fontSize:15,marginBottom:6,color:'#5a8ab0'}}>No archived content yet.</div>
+    <div style=${{fontSize:12,color:'#1a3055'}}>Published assets you archive will appear here, organized by campaign and publish date.</div>
+  </div>`;
+
+  return html`<div>
+    <!-- Filter chips -->
+    <div style=${{display:'flex',gap:6,flexWrap:'wrap',marginBottom:20}}>
+      ${ctChips.map(({k,l,color})=>{
+        const cnt=k==='all'?archive.length:archive.filter(r=>r.content_type===k).length;
+        const active=filterCt===k;
+        return html`<button key=${k} onClick=${()=>setFilterCt(k)} style=${{
+          background:active?color+'22':'#0a1020',color:active?color:'#5a8ab0',
+          border:`0.5px solid ${active?color+'55':'#17304e'}`,
+          borderRadius:20,padding:'6px 16px',fontSize:13,fontWeight:active?700:500,cursor:'pointer'
+        }}>${l} <span style=${{opacity:0.6,fontSize:11}}>(${cnt})</span></button>`;
+      })}
+    </div>
+
+    <!-- Summary strip -->
+    <div style=${{background:'#0a1020',border:'0.5px solid #17304e',borderRadius:8,padding:'10px 16px',marginBottom:20,display:'flex',gap:24,alignItems:'center'}}>
+      <div><span style=${{fontSize:20,fontWeight:800,color:'#2dd4bf'}}>${archive.length}</span><span style=${{fontSize:11,color:'#5a8ab0',marginLeft:6}}>total archived</span></div>
+      <div><span style=${{fontSize:20,fontWeight:800,color:'#4a86f5'}}>${Object.keys(groups).length}</span><span style=${{fontSize:11,color:'#5a8ab0',marginLeft:6}}>campaigns</span></div>
+      <div style=${{marginLeft:'auto',fontSize:11,color:'#274466'}}>Asset URLs preserved · Full content snapshot saved</div>
+    </div>
+
+    <!-- Campaign groups -->
+    ${Object.entries(groups).map(([campaignId,rows])=>{
+      const sample=rows[0];
+      const cLabel=campaignLabel(sample);
+      const cColor=campaignColor(sample);
+      return html`<div key=${campaignId} style=${{marginBottom:28}}>
+        <!-- Campaign header -->
+        <div style=${{display:'flex',alignItems:'center',gap:10,marginBottom:12,paddingBottom:8,borderBottom:`0.5px solid #17304e`}}>
+          <span style=${{background:cColor+'18',color:cColor,borderRadius:6,padding:'3px 10px',fontSize:12,fontWeight:700}}>${cLabel}</span>
+          <span style=${{color:'#274466',fontSize:11}}>${rows.length} post${rows.length!==1?'s':''}</span>
+        </div>
+        <!-- Posts grid -->
+        <div style=${{display:'grid',gridTemplateColumns:'repeat(auto-fill,minmax(280px,1fr))',gap:12}}>
+          ${rows.map(row=>html`<div key=${row.id} style=${{background:'#0a1020',border:'0.5px solid #17304e',borderRadius:10,overflow:'hidden'}}>
+            ${row.asset_url&&html`<div style=${{height:140,overflow:'hidden',background:'#05080f'}}>
+              <img src=${row.asset_url} style=${{width:'100%',height:'100%',objectFit:'cover'}} onError=${e=>e.target.style.display='none'} />
+            </div>`}
+            <div style=${{padding:12}}>
+              <div style=${{fontSize:12,fontWeight:700,color:'#c8d8e8',marginBottom:4,lineHeight:1.3}}>${row.title||'Untitled'}</div>
+              ${row.week_number?html`<div style=${{fontSize:10,color:'#5a8ab0',marginBottom:4}}>Week ${row.week_number}</div>`:''}
+              <div style=${{fontSize:10,color:'#274466',marginBottom:6}}>${row.channel||''}</div>
+              ${row.copy_body?html`<div style=${{fontSize:11,color:'#5a8ab0',lineHeight:1.5,marginBottom:8,maxHeight:60,overflow:'hidden',display:'-webkit-box',WebkitLineClamp:3,WebkitBoxOrient:'vertical'}}>${row.copy_body}</div>`:''}
+              <div style=${{display:'flex',justifyContent:'space-between',alignItems:'center',borderTop:'0.5px solid #0d1a2e',paddingTop:8,marginTop:4}}>
+                <div>
+                  <div style=${{fontSize:11,fontWeight:700,color:'#34d399'}}>🚀 ${fmtDay(row.published_at)}</div>
+                  <div style=${{fontSize:9,color:'#274466',marginTop:1}}>Archived ${fmtShortGlobal(row.archived_at)}</div>
+                </div>
+                ${onPurge&&html`<button onClick=${()=>onPurge(row)} title="Permanently remove this archive record" style=${{background:'transparent',color:'#f87171',border:'0.5px solid rgba(248,113,113,0.3)',borderRadius:6,padding:'4px 10px',fontSize:11,cursor:'pointer'}}>🗑 Purge</button>`}
+              </div>
+            </div>
+          </div>`)}
+        </div>
+      </div>`;
+    })}
+  </div>`;
+}
+
 // ── SCHEDULE TAB ─────────────────────────────────────────────
 function ScheduleTab({schedule}){
   const[l1,setL1]=useState('all');
@@ -1031,11 +1172,12 @@ function App(){
   const[schedule,setSchedule]=useState([]);
   const[rgSchedule,setRgSchedule]=useState({});
   const[deployments,setDeployments]=useState({approvals:[],assets:[]});
+  const[archive,setArchive]=useState([]);
 
   const loadData=useCallback(async(silent=false)=>{
     if(!silent)setLoading(true);
-    const[q,c,m,sched,deps]=await Promise.all([db.getQueue(),db.getClients(),db.getMediaAssets(),db.getContentSchedule(),db.getDeployments()]);
-    setCopyItems(q);setClients(c);setMediaAssets(m);setSchedule(sched);setDeployments(deps);
+    const[q,c,m,sched,deps,arc]=await Promise.all([db.getQueue(),db.getClients(),db.getMediaAssets(),db.getContentSchedule(),db.getDeployments(),db.getArchive()]);
+    setCopyItems(q);setClients(c);setMediaAssets(m);setSchedule(sched);setDeployments(deps);setArchive(arc);
     // Build week-number + scheduled_for map keyed by campaign_asset id (for Real Gains)
     const rgMap={};
     sched.filter(s=>s.content_type==='real_gains').forEach(s=>{
@@ -1069,6 +1211,34 @@ function App(){
       await db.syncContentApproval(asset.id, asset.status);
     }
     setMediaAssets(prev=>prev.map(a=>a.id===asset.id?asset:a));
+  }
+
+  async function handleAssetArchive(asset){
+    if(!confirm(`Archive "${asset.asset_name||'this asset'}" to the Client Repository and remove it from the active pool?\n\nA full snapshot (image URL, copy, publish date) will be saved permanently.`))return;
+    try{
+      const ca=await db.getLinkedCA(asset.id);
+      await db.archiveAsset(asset,ca);
+      await db.deleteAsset(asset.id);
+      if(ca)await db.deleteCA(ca.id);
+      setMediaAssets(prev=>prev.filter(a=>a.id!==asset.id));
+      const arc=await db.getArchive();setArchive(arc);
+    }catch(e){alert('Archive failed — check console for details.');}
+  }
+
+  async function handleAssetDelete(asset){
+    if(!confirm(`Permanently delete this rejected asset?\n\n"${asset.asset_name||asset.id}"\n\nThis cannot be undone.`))return;
+    const ca=await db.getLinkedCA(asset.id);
+    await db.deleteAsset(asset.id);
+    if(ca)await db.deleteCA(ca.id);
+    setMediaAssets(prev=>prev.filter(a=>a.id!==asset.id));
+  }
+
+  async function handleArchivePurge(row){
+    if(!confirm(`Permanently purge this archive record?\n\n"${row.title||row.campaign_id}"\n\nThe snapshot will be deleted. This cannot be undone.`))return;
+    try{
+      await fetch(`${SB_URL}/rest/v1/content_archive?id=eq.${row.id}`,{method:'DELETE',headers:SBH});
+      setArchive(prev=>prev.filter(r=>r.id!==row.id));
+    }catch(e){console.error(e);}
   }
 
   // Stats — combined across copy + media for Content tab
@@ -1114,6 +1284,7 @@ function App(){
 
   const pendingContent=(contentCounts['pending_review']||0);
   const showFilters=activeTab==='content';
+  const pendingArchiveCleanup=mediaAssets.filter(a=>a.status==='published'||a.status==='rejected').length;
 
   return html`<div style=${{minHeight:'100vh',background:C.bg}}>
 
@@ -1147,6 +1318,10 @@ function App(){
         </button>
         <button onClick=${()=>setActiveTab('deployments')} style=${{background:activeTab==='deployments'?'#6366f1':C.s1,color:activeTab==='deployments'?'#fff':C.dm,border:`0.5px solid ${activeTab==='deployments'?'#6366f1':C.bd}`,borderRadius:8,padding:'9px 22px',fontSize:14,fontWeight:600,cursor:'pointer'}}>
           🚀 Deployments
+        </button>
+        <button onClick=${()=>setActiveTab('archive')} style=${{background:activeTab==='archive'?'#2dd4bf':C.s1,color:activeTab==='archive'?'#001a18':C.dm,border:`0.5px solid ${activeTab==='archive'?'#2dd4bf':C.bd}`,borderRadius:8,padding:'9px 22px',fontSize:14,fontWeight:600,cursor:'pointer',position:'relative'}}>
+          📦 Archive
+          ${archive.length>0?html`<span style=${{position:'absolute',top:-6,right:-6,background:'#2dd4bf',color:'#001a18',borderRadius:10,padding:'1px 6px',fontSize:10,fontWeight:700}}>${archive.length}</span>`:''}
         </button>
       </div>
 
@@ -1198,19 +1373,26 @@ function App(){
       <!-- Content -->
       ${loading
         ?html`<${Spinner}/>`
-        :activeTab==='deployments'
+        :activeTab==='archive'
+          ?html`<${ArchiveTab} archive=${archive} onPurge=${handleArchivePurge} />`
+          :activeTab==='deployments'
           ?html`<${DeploymentTab} deployments=${deployments} clients=${clients} />`
           :activeTab==='schedule'
           ?html`<${ScheduleTab} schedule=${schedule} />`
           :/* activeTab === 'content' */
             html`<div>
+              ${pendingArchiveCleanup>0&&html`<div style=${{background:'rgba(45,212,191,0.07)',border:'0.5px solid rgba(45,212,191,0.25)',borderRadius:8,padding:'10px 16px',marginBottom:16,display:'flex',alignItems:'center',gap:12}}>
+                <span style=${{fontSize:13}}>📦</span>
+                <span style=${{color:'#5a8ab0',fontSize:12,flex:1}}>${pendingArchiveCleanup} asset${pendingArchiveCleanup!==1?'s':''} published or rejected — open them to archive or delete and free up space.</span>
+                <button onClick=${()=>{setFilterStatus('published');}} style=${{background:'transparent',color:'#2dd4bf',border:'0.5px solid rgba(45,212,191,0.4)',borderRadius:6,padding:'4px 12px',fontSize:11,cursor:'pointer'}}>View Published</button>
+              </div>`}
               ${filteredMedia.length===0&&filteredCopy.length===0&&html`<div style=${{textAlign:'center',padding:'80px 20px',color:C.mt}}>
                   <div style=${{fontSize:32,marginBottom:12}}>${mediaAssets.length===0&&copyItems.length===0?'📭':'🔍'}</div>
                   <div style=${{fontSize:14}}>${mediaAssets.length===0&&copyItems.length===0?'No content yet — run a campaign to generate assets':'No content matches current filters'}</div>
                 </div>`}
               <!-- Media assets grid -->
               ${filteredMedia.length>0&&html`<div style=${{display:'grid',gridTemplateColumns:'repeat(auto-fill,minmax(340px,1fr))',gap:16,marginBottom:24}}>
-                ${filteredMedia.map(asset=>html`<${MediaAssetCard} key=${asset.id} asset=${asset} weekInfo=${rgSchedule[asset.id]||null} onUpdate=${handleAssetUpdate} />`)}
+                ${filteredMedia.map(asset=>html`<${MediaAssetCard} key=${asset.id} asset=${asset} weekInfo=${rgSchedule[asset.id]||null} onUpdate=${handleAssetUpdate} onArchive=${handleAssetArchive} onDelete=${handleAssetDelete} />`)}
               </div>`}
               <!-- Copy queue section (only shown if items exist) -->
               ${filteredCopy.length>0&&html`<div>
