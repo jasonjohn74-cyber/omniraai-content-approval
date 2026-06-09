@@ -98,10 +98,21 @@ const db={
   },
   async getContentSchedule(){
     try{
-      const r=await fetch(`${SB_URL}/rest/v1/content_approvals?select=id,content_type,week_number,subject,status,scheduled_for,full_content&order=scheduled_for.asc`,{headers:SBH});
+      const r=await fetch(`${SB_URL}/rest/v1/content_approvals?select=id,content_type,week_number,subject,status,scheduled_for,approved_at,full_content&order=scheduled_for.asc`,{headers:SBH});
       const d=await r.json();
       return Array.isArray(d)?d:[];
     }catch{return[];}
+  },
+  async getDeployments(){
+    try{
+      const[r1,r2]=await Promise.all([
+        fetch(`${SB_URL}/rest/v1/content_approvals?status=in.(approved,published,skipped)&select=id,content_type,week_number,subject,status,scheduled_for,approved_at,updated_at,full_content&order=scheduled_for.asc`,{headers:SBH}),
+        fetch(`${SB_URL}/rest/v1/campaign_assets?status=in.(approved,published)&select=id,campaign_id,campaign_name,channel,asset_name,variant_label,status,approved_at,published_at,platform_post_id,deployment_error,data&order=approved_at.asc`,{headers:SBH})
+      ]);
+      const approvals=await r1.json();
+      const assets=await r2.json();
+      return{approvals:Array.isArray(approvals)?approvals:[],assets:Array.isArray(assets)?assets:[]};
+    }catch{return{approvals:[],assets:[]};}
   },
   async uploadToStorage(file,path){
     try{
@@ -659,6 +670,123 @@ function CopyContentCard({item,onUpdate,onDelete,busy}){
   </div>`;
 }
 
+// ── DEPLOYMENT TAB ────────────────────────────────────────────
+function DeploymentTab({deployments}){
+  const{approvals,assets}=deployments;
+  const now=new Date();
+  const fmtDate=d=>d?new Date(d).toLocaleDateString('en-MY',{day:'numeric',month:'short',year:'numeric',hour:'2-digit',minute:'2-digit'}):'—';
+  const fmtDateShort=d=>d?new Date(d).toLocaleDateString('en-MY',{day:'numeric',month:'short'}):'—';
+  const CT_ICON={email:'📧',social:'📸',real_gains:'🏓'};
+  const CT_LABEL={email:'Email Blast',social:'Social Post',real_gains:'Real Gains'};
+  const CH_ICON={ig_post:'📸','instagram,facebook':'📸📘',fb_post:'📘',email:'📧',wa_poster:'💬'};
+
+  // Build unified deployment rows from content_approvals
+  const caRows=approvals.map(ca=>{
+    const isPublished=ca.status==='published';
+    const isApproved=ca.status==='approved';
+    const isSkipped=ca.status==='skipped';
+    const schDate=ca.scheduled_for?new Date(ca.scheduled_for):null;
+    const isPast=schDate&&schDate<now;
+    const daysUntil=schDate?Math.ceil((schDate-now)/(86400000)):null;
+    // Find linked campaign_asset for this approval
+    const linkedAsset=assets.find(a=>a.id===ca.full_content?.asset_id);
+    const campaignName=linkedAsset?.campaign_name||{email:'Titan Drill Series',social:'Titan Social',real_gains:'Real Gains with Titan'}[ca.content_type]||'Titan';
+    const postId=linkedAsset?.platform_post_id||null;
+    const deployErr=linkedAsset?.deployment_error||null;
+    return{id:ca.id,type:'content_approval',content_type:ca.content_type,week_number:ca.week_number,
+      subject:ca.subject,campaign:campaignName,channel:ca.content_type==='email'?'email':linkedAsset?.channel||'instagram,facebook',
+      scheduled_for:ca.scheduled_for,approved_at:ca.approved_at,
+      status:isPublished?'published':isSkipped?'skipped':isApproved?'approved':'approved',
+      platform_post_id:postId,deployment_error:deployErr,isPast,daysUntil};
+  });
+
+  // Separate campaign_assets not linked via content_approvals (standalone assets)
+  const caIds=new Set(approvals.map(ca=>ca.full_content?.asset_id).filter(Boolean));
+  const standaloneAssets=assets.filter(a=>!caIds.has(a.id)&&a.status==='published');
+
+  const publishedCount=caRows.filter(r=>r.status==='published').length;
+  const scheduledCount=caRows.filter(r=>r.status==='approved').length;
+  const failedCount=caRows.filter(r=>r.deployment_error).length;
+
+  const StatusCell=({row})=>{
+    if(row.deployment_error)return html`<div>
+      <span style=${{color:'#f87171',fontWeight:700,fontSize:12}}>❌ Failed</span>
+      <div style=${{color:'#f87171',fontSize:10,marginTop:2,maxWidth:200,wordBreak:'break-word'}}>${row.deployment_error}</div>
+    </div>`;
+    if(row.status==='published')return html`<span style=${{color:'#34d399',fontWeight:700,fontSize:12}}>✓ Published</span>`;
+    if(row.status==='skipped')return html`<span style=${{color:'#5a8ab0',fontSize:12}}>⏭ Skipped</span>`;
+    if(row.isPast)return html`<span style=${{color:'#f87171',fontSize:12}}>⚠ Overdue</span>`;
+    if(row.daysUntil!==null&&row.daysUntil<=1)return html`<span style=${{color:'#fbbf24',fontWeight:700,fontSize:12}}>⚡ Tomorrow</span>`;
+    if(row.daysUntil!==null&&row.daysUntil<=3)return html`<span style=${{color:'#fbbf24',fontSize:12}}>⚡ In ${row.daysUntil}d</span>`;
+    return html`<span style=${{color:'#4a86f5',fontSize:12}}>📅 Scheduled</span>`;
+  };
+
+  return html`<div>
+    <!-- Summary counts -->
+    <div style=${{display:'flex',gap:10,marginBottom:20,flexWrap:'wrap'}}>
+      ${[
+        {l:'✓ Published',n:publishedCount,c:'#34d399'},
+        {l:'📅 Scheduled',n:scheduledCount,c:'#4a86f5'},
+        {l:'❌ Failed',n:failedCount,c:'#f87171'},
+        {l:'Total Tracked',n:caRows.length,c:'#5a8ab0'},
+      ].map(({l,n,c})=>html`<div style=${{background:'#0a1020',border:`0.5px solid ${c}30`,borderRadius:8,padding:'10px 18px',flex:1,minWidth:130,textAlign:'center'}}>
+        <div style=${{fontSize:22,fontWeight:800,color:c}}>${n}</div>
+        <div style=${{fontSize:11,color:'#5a8ab0',marginTop:2}}>${l}</div>
+      </div>`)}
+    </div>
+
+    <!-- Table -->
+    <div style=${{background:'#0a1020',border:'0.5px solid #17304e',borderRadius:10,overflow:'hidden'}}>
+      <!-- Header -->
+      <div style=${{display:'grid',gridTemplateColumns:'32px 1fr 130px 90px 110px 80px 130px',gap:0,background:'#0e1830',borderBottom:'0.5px solid #17304e',padding:'10px 14px',fontSize:10,fontWeight:700,color:'#5a8ab0',textTransform:'uppercase',letterSpacing:'0.5px'}}>
+        <div>#</div><div>Campaign & Content</div><div>Channel</div><div>Week</div><div>Scheduled</div><div>Approved</div><div>Deployment</div>
+      </div>
+
+      ${caRows.length===0&&html`<div style=${{textAlign:'center',padding:'60px 20px',color:'#274466'}}>
+        <div style=${{fontSize:28,marginBottom:10}}>🚀</div>
+        <div>No approved or published content yet.</div>
+      </div>`}
+
+      ${caRows.map((row,i)=>{
+        const isPublished=row.status==='published';
+        const hasError=!!row.deployment_error;
+        const rowBg=i%2===0?'transparent':'rgba(14,24,48,0.4)';
+        const borderHighlight=hasError?'rgba(248,113,113,0.15)':isPublished?'rgba(52,211,153,0.05)':'transparent';
+        return html`<div key=${row.id} style=${{
+          display:'grid',gridTemplateColumns:'32px 1fr 130px 90px 110px 80px 130px',gap:0,
+          padding:'11px 14px',borderBottom:'0.5px solid #13213e',background:borderHighlight||rowBg,
+          alignItems:'center'
+        }}>
+          <div style=${{color:'#274466',fontSize:11}}>${i+1}</div>
+          <div>
+            <div style=${{color:'#cfe0f5',fontSize:12,fontWeight:500,marginBottom:1}}>${row.subject?.replace(/^[🏓📧📸]\s*/,'').slice(0,55)||'—'}</div>
+            <div style=${{color:'#274466',fontSize:10}}>${row.campaign}</div>
+          </div>
+          <div style=${{color:'#5a8ab0',fontSize:11}}>${CT_ICON[row.content_type]||'📄'} ${CT_LABEL[row.content_type]||row.content_type}</div>
+          <div style=${{color:'#4a86f5',fontWeight:700,fontSize:12}}>Wk ${row.week_number||'—'}</div>
+          <div style=${{color:'#5a8ab0',fontSize:11}}>${fmtDateShort(row.scheduled_for)}</div>
+          <div style=${{color:'#274466',fontSize:10}}>${fmtDateShort(row.approved_at)}</div>
+          <div><${StatusCell} row=${row} /></div>
+        </div>`;
+      })}
+    </div>
+
+    ${standaloneAssets.length>0&&html`<div style=${{marginTop:24}}>
+      <div style=${{marginBottom:8,color:'#5a8ab0',fontWeight:700,fontSize:11,textTransform:'uppercase',letterSpacing:'1px'}}>Other Published Assets</div>
+      ${standaloneAssets.map((a,i)=>html`<div key=${a.id} style=${{background:'#0a1020',border:'0.5px solid #13213e',borderRadius:8,padding:'10px 14px',marginBottom:5,display:'flex',justifyContent:'space-between',alignItems:'center',gap:12,flexWrap:'wrap'}}>
+        <div>
+          <div style=${{color:'#cfe0f5',fontSize:12,fontWeight:500}}>${a.asset_name||a.campaign_id}</div>
+          <div style=${{color:'#274466',fontSize:10}}>${a.campaign_name} · ${a.channel} · v${a.variant_label||'A'}</div>
+        </div>
+        <div style=${{display:'flex',gap:8,alignItems:'center',flexShrink:0}}>
+          ${a.platform_post_id?html`<span style=${{color:'#34d399',fontSize:11}}>✓ Post ID: ${a.platform_post_id.slice(0,16)}…</span>`:''}
+          ${a.deployment_error?html`<span style=${{color:'#f87171',fontSize:11}}>❌ ${a.deployment_error.slice(0,50)}</span>`:html`<span style=${{color:'#34d399',fontWeight:700,fontSize:12}}>✓ Published</span>`}
+        </div>
+      </div>`)}
+    </div>`}
+  </div>`;
+}
+
 // ── SCHEDULE TAB ─────────────────────────────────────────────
 const CA_STATUS_MAP={
   pending:     {l:'Pending Approval',c:'#fbbf24',icon:'⏳'},
@@ -785,11 +913,12 @@ function App(){
   const[lastRefresh,setLastRefresh]=useState(null);
   const[schedule,setSchedule]=useState([]);
   const[rgSchedule,setRgSchedule]=useState({});
+  const[deployments,setDeployments]=useState({approvals:[],assets:[]});
 
   const loadData=useCallback(async(silent=false)=>{
     if(!silent)setLoading(true);
-    const[q,c,m,sched]=await Promise.all([db.getQueue(),db.getClients(),db.getMediaAssets(),db.getContentSchedule()]);
-    setCopyItems(q);setClients(c);setMediaAssets(m);setSchedule(sched);
+    const[q,c,m,sched,deps]=await Promise.all([db.getQueue(),db.getClients(),db.getMediaAssets(),db.getContentSchedule(),db.getDeployments()]);
+    setCopyItems(q);setClients(c);setMediaAssets(m);setSchedule(sched);setDeployments(deps);
     // Build week-number + scheduled_for map keyed by campaign_asset id (for Real Gains)
     const rgMap={};
     sched.filter(s=>s.content_type==='real_gains').forEach(s=>{
@@ -892,6 +1021,9 @@ function App(){
         <button onClick=${()=>setActiveTab('schedule')} style=${{background:activeTab==='schedule'?C.tl:C.s1,color:activeTab==='schedule'?'#001a18':C.dm,border:`0.5px solid ${activeTab==='schedule'?C.tl:C.bd}`,borderRadius:8,padding:'9px 20px',fontSize:14,fontWeight:600,cursor:'pointer'}}>
           📅 Schedule
         </button>
+        <button onClick=${()=>setActiveTab('deployments')} style=${{background:activeTab==='deployments'?'#6366f1':C.s1,color:activeTab==='deployments'?'#fff':C.dm,border:`0.5px solid ${activeTab==='deployments'?'#6366f1':C.bd}`,borderRadius:8,padding:'9px 20px',fontSize:14,fontWeight:600,cursor:'pointer'}}>
+          🚀 Deployments
+        </button>
       </div>
 
       <!-- Stats row -->
@@ -920,7 +1052,9 @@ function App(){
       <!-- Content -->
       ${loading
         ?html`<${Spinner}/>`
-        :activeTab==='schedule'
+        :activeTab==='deployments'
+          ?html`<${DeploymentTab} deployments=${deployments} />`
+          :activeTab==='schedule'
           ?html`<${ScheduleTab} schedule=${schedule} />`
           :activeTab==='copy'
             ?(filteredCopy.length===0
