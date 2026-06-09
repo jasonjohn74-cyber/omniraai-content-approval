@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>OmniraAI — Content Approval</title>
+<title>OmniraAI — Content Approval v12</title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0;}
 body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#05080f;color:#cfe0f5;}
@@ -162,7 +162,8 @@ const CHANNEL_META={
 
 const now=()=>new Date().toISOString();
 const uid=()=>Math.random().toString(36).slice(2,9)+Date.now().toString(36).slice(-4);
-const fmtdt=d=>d?new Date(d).toLocaleString('en-MY',{day:'numeric',month:'short',hour:'2-digit',minute:'2-digit'}):'—';
+const MYT={timeZone:'Asia/Kuala_Lumpur'};
+const fmtdt=d=>d?new Date(d).toLocaleString('en-MY',{day:'numeric',month:'short',hour:'2-digit',minute:'2-digit',...MYT}):'—';
 const varLabel=i=>String.fromCharCode(65+i);
 
 // ── SHARED UI ────────────────────────────────────────────────
@@ -324,7 +325,7 @@ function MediaAssetCard({asset,onUpdate,weekInfo}){
         <span style=${{color:'#2dd4bf',fontWeight:800,fontSize:12}}>Wk ${weekInfo.week_number}</span>
       </div>
       <span style=${{color:weekInfo.ca_status==='approved'?'#34d399':weekInfo.ca_status==='published'?'#2dd4bf':'#5a8ab0',fontSize:11}}>
-        ${weekInfo.ca_status==='approved'?'✓ Approved · ':weekInfo.ca_status==='published'?'🚀 Published · ':'⏳ Pending · '}Fri ${new Date(weekInfo.scheduled_for).toLocaleDateString('en-MY',{day:'numeric',month:'short',year:'numeric'})}
+        ${weekInfo.ca_status==='approved'?'✓ Approved · ':weekInfo.ca_status==='published'?'🚀 Published · ':'⏳ Pending · '}Fri ${new Date(weekInfo.scheduled_for).toLocaleDateString('en-MY',{day:'numeric',month:'short',year:'numeric',...MYT})}
       </span>
     </div>`}
 
@@ -487,9 +488,15 @@ function MediaAssetCard({asset,onUpdate,weekInfo}){
 
       ${isApproved&&html`<div style=${{borderTop:`0.5px solid ${C.bd}`,paddingTop:12}}>
         <div style=${{color:C.ok,fontSize:11,marginBottom:10}}>✓ Approved ${fmtdt(asset.approved_at)}</div>
-        <button onClick=${doPublish} style=${{background:C.tl,color:'#001a18',border:'none',borderRadius:6,padding:'8px 18px',fontSize:13,fontWeight:700,cursor:'pointer'}}>
-          🚀 Mark as Published
-        </button>
+        <div style=${{display:'flex',gap:8,flexWrap:'wrap'}}>
+          <button onClick=${doPublish} style=${{background:C.tl,color:'#001a18',border:'none',borderRadius:6,padding:'8px 18px',fontSize:13,fontWeight:700,cursor:'pointer'}}>
+            🚀 Mark as Published
+          </button>
+          <button onClick=${async()=>{await onUpdate({...asset,status:'pending_review',approved_at:null});}} style=${{background:'transparent',color:'#fbbf24',border:'0.5px solid rgba(251,191,36,0.5)',borderRadius:6,padding:'8px 14px',fontSize:13,cursor:'pointer'}} title="Re-open this asset so you can revise copy or regenerate the image before publishing">
+            ✏️ Re-open for Revision
+          </button>
+        </div>
+        <div style=${{color:'#5a8ab0',fontSize:10,marginTop:6}}>Re-open returns this to Pending so you can revise or regenerate before publishing.</div>
       </div>`}
 
       ${asset.status==='published'&&html`<div style=${{color:C.tl,fontSize:11,paddingTop:8,borderTop:`0.5px solid ${C.bd}`}}>🚀 Published ${fmtdt(asset.published_at)}</div>`}
@@ -676,10 +683,11 @@ function CopyContentCard({item,onUpdate,onDelete,busy}){
 
 // ── DEPLOYMENT TAB ────────────────────────────────────────────
 function DeploymentTab({deployments}){
-  const[campFilter,setCampFilter]=useState('all');
+  const[l1,setL1]=useState('all');
+  const[l2,setL2]=useState('all');
   const{approvals,assets}=deployments;
   const now=new Date();
-  const fmtShort=d=>d?new Date(d).toLocaleDateString('en-MY',{day:'numeric',month:'short'}):'—';
+  const fmtShort=d=>d?new Date(d).toLocaleDateString('en-MY',{day:'numeric',month:'short',...MYT}):'—';
 
   // Build unified rows from content_approvals
   const allRows=approvals.map(ca=>{
@@ -704,7 +712,9 @@ function DeploymentTab({deployments}){
     };
   }).sort((a,b)=>new Date(a.scheduled_for)-new Date(b.scheduled_for));
 
-  const filtered=campFilter==='all'?allRows:allRows.filter(r=>r.content_type===campFilter);
+  const ctFilter=resolveCtFilter(l1,l2);
+  const matchesDep=r=>ctFilter==='all'?true:ctFilter==='tdow'?(r.content_type==='email'||r.content_type==='social'):r.content_type===ctFilter;
+  const filtered=allRows.filter(matchesDep);
 
   const publishedCount=allRows.filter(r=>r.status==='published').length;
   const scheduledCount=allRows.filter(r=>r.status==='approved').length;
@@ -727,18 +737,37 @@ function DeploymentTab({deployments}){
   }
 
   return html`<div>
-    <!-- Campaign filter chips -->
-    <div style=${{display:'flex',gap:6,marginBottom:16,flexWrap:'wrap'}}>
-      ${SCHED_CAMPAIGNS.map(({k,l,icon,color})=>{
-        const cnt=k==='all'?allRows.length:allRows.filter(r=>r.content_type===k).length;
-        const active=campFilter===k;
-        return html`<button key=${k} onClick=${()=>setCampFilter(k)} style=${{
+    <!-- Level 1: Campaign -->
+    <div style=${{marginBottom:8,color:'#5a8ab0',fontSize:10,fontWeight:700,textTransform:'uppercase',letterSpacing:'1px'}}>Campaign</div>
+    <div style=${{display:'flex',gap:6,marginBottom:12,flexWrap:'wrap'}}>
+      ${CAMP_L1.map(({k,l,color})=>{
+        const cnt=k==='all'?allRows.length:k==='tdow'
+          ?allRows.filter(r=>r.content_type==='email'||r.content_type==='social').length
+          :allRows.filter(r=>r.content_type===k).length;
+        const active=l1===k;
+        return html`<button key=${k} onClick=${()=>{setL1(k);setL2('all');}} style=${{
           background:active?color+'22':'#0a1020',color:active?color:'#5a8ab0',
           border:`0.5px solid ${active?color+'55':'#17304e'}`,
-          borderRadius:20,padding:'5px 14px',fontSize:12,fontWeight:active?700:400,cursor:'pointer'
-        }}>${icon?icon+' ':''} ${l} (${cnt})</button>`;
+          borderRadius:20,padding:'6px 16px',fontSize:13,fontWeight:active?700:500,cursor:'pointer'
+        }}>${l} <span style=${{opacity:0.6,fontSize:11}}>(${cnt})</span></button>`;
       })}
     </div>
+    <!-- Level 2: Channel -->
+    ${l1!=='all'&&CAMP_L2[l1]&&html`<div style=${{marginBottom:16}}>
+      <div style=${{marginBottom:8,color:'#5a8ab0',fontSize:10,fontWeight:700,textTransform:'uppercase',letterSpacing:'1px'}}>Channel</div>
+      <div style=${{display:'flex',gap:6,flexWrap:'wrap'}}>
+        ${CAMP_L2[l1].map(({k,l,color,ct})=>{
+          const cnt=ct?allRows.filter(r=>r.content_type===ct).length
+            :allRows.filter(r=>r.content_type==='email'||r.content_type==='social').length;
+          const active=l2===k;
+          return html`<button key=${k} onClick=${()=>setL2(k)} style=${{
+            background:active?color+'22':'#0a1020',color:active?color:'#5a8ab0',
+            border:`0.5px solid ${active?color+'55':'#17304e'}`,
+            borderRadius:20,padding:'5px 14px',fontSize:12,fontWeight:active?700:400,cursor:'pointer'
+          }}>${l} <span style=${{opacity:0.6,fontSize:11}}>(${cnt})</span></button>`;
+        })}
+      </div>
+    </div>`}
 
     <!-- Summary chips -->
     <div style=${{display:'flex',gap:10,marginBottom:16,flexWrap:'wrap'}}>
@@ -817,27 +846,57 @@ const CAMPAIGN_META={
   social:     {icon:'📸',label:'TDOW Social',    campaign:'TDOW Social Series',       channel:'📸 Instagram · 📘 Facebook', color:'#fb923c'},
   real_gains: {icon:'🏓',label:'Real Gains',     campaign:'Real Gains w/ Titan',      channel:'📸 Instagram · 📘 Facebook', color:'#2dd4bf'},
 };
+// Two-level campaign filter config
+const CAMP_L1=[
+  {k:'all',        l:'All Campaigns', color:'#4a86f5'},
+  {k:'tdow',       l:'TDOW',          color:'#fb923c', desc:'Titan Drill of the Week'},
+  {k:'real_gains', l:'Real Gains',    color:'#2dd4bf', desc:'Real Gains w/ Titan'},
+];
+const CAMP_L2={
+  tdow:[
+    {k:'all',    l:'All TDOW',         color:'#fb923c'},
+    {k:'email',  l:'📧 Email',          color:'#4a86f5', ct:'email'},
+    {k:'social', l:'📸 IG  📘 FB', color:'#fb923c', ct:'social'},
+  ],
+  real_gains:[
+    {k:'all', l:'📸 IG  📘 FB', color:'#2dd4bf', ct:'real_gains'},
+  ],
+};
+// Map l1+l2 → content_type filter
+function resolveCtFilter(l1,l2){
+  if(l1==='all')return'all';
+  if(l1==='real_gains')return'real_gains';
+  if(l1==='tdow'){
+    if(l2==='email')return'email';
+    if(l2==='social')return'social';
+    return'tdow'; // both email+social
+  }
+  return'all';
+}
 const SCHED_CAMPAIGNS=[
-  {k:'all',    l:'All Active Campaigns', color:'#4a86f5'},
-  {k:'email',  l:'TDOW Email',    icon:'📧', color:'#4a86f5'},
-  {k:'social', l:'TDOW Social',   icon:'📸', color:'#fb923c'},
-  {k:'real_gains',l:'Real Gains', icon:'🏓', color:'#2dd4bf'},
+  {k:'all',        l:'All Active Campaigns', color:'#4a86f5'},
+  {k:'email',      l:'TDOW Email',    icon:'📧', color:'#4a86f5'},
+  {k:'social',     l:'TDOW Social',   icon:'📸', color:'#fb923c'},
+  {k:'real_gains', l:'Real Gains',    icon:'🏓', color:'#2dd4bf'},
 ];
 
 // ── SCHEDULE TAB ─────────────────────────────────────────────
 function ScheduleTab({schedule}){
-  const[campFilter,setCampFilter]=useState('all');
+  const[l1,setL1]=useState('all');
+  const[l2,setL2]=useState('all');
   const now=new Date();
-
-  const fmtDay=d=>{
-    if(!d)return'—';
-    const dt=new Date(d);
-    return dt.toLocaleDateString('en-MY',{weekday:'short',day:'numeric',month:'short',year:'numeric'});
-  };
   const daysAway=d=>Math.ceil((new Date(d)-now)/(1000*60*60*24));
 
-  const filtered=(campFilter==='all'?schedule:schedule.filter(s=>s.content_type===campFilter))
-    .filter(s=>s.scheduled_for); // exclude null dates
+  // Resolve which content_types to show based on l1 + l2
+  const ctFilter=resolveCtFilter(l1,l2);
+  const matchesCt=s=>{
+    if(ctFilter==='all')return true;
+    if(ctFilter==='tdow')return s.content_type==='email'||s.content_type==='social';
+    return s.content_type===ctFilter;
+  };
+
+  const valid=schedule.filter(s=>s.scheduled_for);
+  const filtered=valid.filter(matchesCt);
   const upcoming=filtered.filter(s=>s.status!=='published'&&new Date(s.scheduled_for)>=now)
     .sort((a,b)=>new Date(a.scheduled_for)-new Date(b.scheduled_for));
   const past=filtered.filter(s=>s.status==='published'||new Date(s.scheduled_for)<now)
@@ -852,29 +911,22 @@ function ScheduleTab({schedule}){
     const st=CA_STATUS_MAP[item.status]||{l:item.status,c:'#5a8ab0',icon:''};
     const da=daysAway(item.scheduled_for);
     const isUrgent=da>=0&&da<=3&&item.status==='pending';
-    // Strip prefix from subject for clean title
     const title=(item.subject||'').replace(/^(TDOW (Email|Social) Wk\d+:|Real Gains Wk\d+:)\s*/i,'').replace(/^[🏓📧📸]+\s*/,'');
     return html`<div style=${{
       background:'#0a1020',
       border:`0.5px solid ${isUrgent?'rgba(251,191,36,0.45)':item.status==='approved'?'rgba(52,211,153,0.2)':'#13213e'}`,
-      borderRadius:8,padding:'11px 16px',marginBottom:5,opacity:dim?0.55:1
+      borderRadius:8,padding:'11px 16px',marginBottom:5,opacity:dim?0.5:1
     }}>
       <div style=${{display:'flex',alignItems:'center',gap:10,flexWrap:'wrap'}}>
-        <!-- Campaign pill -->
         <span style=${{background:m.color+'18',color:m.color,border:`0.5px solid ${m.color}35`,borderRadius:10,padding:'2px 9px',fontSize:10,fontWeight:700,flexShrink:0}}>
           ${m.icon} ${m.campaign}
         </span>
-        <!-- Channel -->
-        <span style=${{color:'#5a8ab0',fontSize:10,flexShrink:0}}>${m.channel}</span>
-        <!-- Week -->
+        <span style=${{background:'rgba(255,255,255,0.04)',color:'#5a8ab0',border:'0.5px solid #17304e',borderRadius:8,padding:'2px 8px',fontSize:10,flexShrink:0}}>${m.channel}</span>
         <span style=${{color:m.color,fontWeight:800,fontSize:12,flexShrink:0}}>Wk ${item.week_number}</span>
-        <!-- Title -->
         <span style=${{flex:1,minWidth:100,color:'#cfe0f5',fontSize:13,fontWeight:500,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>${title.slice(0,65)}</span>
-        <!-- Date -->
         <span style=${{color:'#5a8ab0',fontSize:11,flexShrink:0}}>
-          📅 ${fmtDay(item.scheduled_for)}${da===0?' (today)':da===1?' (tomorrow)':da>0&&da<=7?` (in ${da}d)`:da<0&&!dim?' ⚠ overdue':''}
+          📅 ${fmtDay(item.scheduled_for)}${da===0?' · today':da===1?' · tomorrow':da>0&&da<=7?` · in ${da}d`:da<0&&!dim?' · ⚠ overdue':''}
         </span>
-        <!-- Status + urgency -->
         <div style=${{display:'flex',gap:5,alignItems:'center',flexShrink:0}}>
           ${isUrgent?html`<span style=${{background:'rgba(251,191,36,0.12)',color:'#fbbf24',border:'0.5px solid rgba(251,191,36,0.35)',borderRadius:10,padding:'2px 7px',fontSize:10,fontWeight:700}}>⚡ SOON</span>`:''}
           <span style=${{background:`${st.c}15`,color:st.c,border:`0.5px solid ${st.c}35`,borderRadius:20,padding:'2px 9px',fontSize:11,fontWeight:600,whiteSpace:'nowrap'}}>${st.icon} ${st.l}</span>
@@ -884,31 +936,51 @@ function ScheduleTab({schedule}){
   }
 
   return html`<div>
-    <!-- Campaign filter chips -->
-    <div style=${{display:'flex',gap:6,marginBottom:16,flexWrap:'wrap'}}>
-      ${SCHED_CAMPAIGNS.map(({k,l,icon,color})=>{
-        const cnt=k==='all'?schedule.filter(s=>s.scheduled_for).length:schedule.filter(s=>s.content_type===k&&s.scheduled_for).length;
-        const active=campFilter===k;
-        return html`<button key=${k} onClick=${()=>setCampFilter(k)} style=${{
+    <!-- Level 1: Campaign -->
+    <div style=${{marginBottom:8,color:'#5a8ab0',fontSize:10,fontWeight:700,textTransform:'uppercase',letterSpacing:'1px'}}>Campaign</div>
+    <div style=${{display:'flex',gap:6,marginBottom:12,flexWrap:'wrap'}}>
+      ${CAMP_L1.map(({k,l,color,desc})=>{
+        const cnt=k==='all'?valid.length:k==='tdow'
+          ?valid.filter(s=>s.content_type==='email'||s.content_type==='social').length
+          :valid.filter(s=>s.content_type===k).length;
+        const active=l1===k;
+        return html`<button key=${k} onClick=${()=>{setL1(k);setL2('all');}} style=${{
           background:active?color+'22':'#0a1020',color:active?color:'#5a8ab0',
           border:`0.5px solid ${active?color+'55':'#17304e'}`,
-          borderRadius:20,padding:'5px 14px',fontSize:12,fontWeight:active?700:400,cursor:'pointer',transition:'all 0.15s'
-        }}>${icon?icon+' ':''} ${l} (${cnt})</button>`;
+          borderRadius:20,padding:'6px 16px',fontSize:13,fontWeight:active?700:500,cursor:'pointer'
+        }}>${l} <span style=${{opacity:0.6,fontSize:11}}>(${cnt})</span></button>`;
       })}
     </div>
 
+    <!-- Level 2: Channel (only when a campaign is selected) -->
+    ${l1!=='all'&&CAMP_L2[l1]&&html`<div>
+      <div style=${{marginBottom:8,color:'#5a8ab0',fontSize:10,fontWeight:700,textTransform:'uppercase',letterSpacing:'1px'}}>Channel</div>
+      <div style=${{display:'flex',gap:6,marginBottom:16,flexWrap:'wrap'}}>
+        ${CAMP_L2[l1].map(({k,l,color,ct})=>{
+          const cnt=ct?valid.filter(s=>s.content_type===ct).length
+            :valid.filter(s=>s.content_type==='email'||s.content_type==='social').length;
+          const active=l2===k;
+          return html`<button key=${k} onClick=${()=>setL2(k)} style=${{
+            background:active?color+'22':'#0a1020',color:active?color:'#5a8ab0',
+            border:`0.5px solid ${active?color+'55':'#17304e'}`,
+            borderRadius:20,padding:'5px 14px',fontSize:12,fontWeight:active?700:400,cursor:'pointer'
+          }}>${l} <span style=${{opacity:0.6,fontSize:11}}>(${cnt})</span></button>`;
+        })}
+      </div>
+    </div>`}
+
     <!-- Per-campaign summary chips -->
     <div style=${{display:'flex',gap:8,marginBottom:18,flexWrap:'wrap'}}>
-      ${(['email','social','real_gains']).filter(ct=>campFilter==='all'||campFilter===ct).map(ct=>{
-        const items=schedule.filter(s=>s.content_type===ct);
+      ${(['email','social','real_gains']).filter(ct=>matchesCt({content_type:ct})).map(ct=>{
+        const items=valid.filter(s=>s.content_type===ct);
         if(!items.length)return null;
         const m=CAMPAIGN_META[ct];
         const app=items.filter(s=>s.status==='approved'||s.status==='published').length;
         const pend=items.filter(s=>s.status==='pending').length;
         return html`<div key=${ct} style=${{background:'#0a1020',border:`0.5px solid ${m.color}28`,borderRadius:8,padding:'9px 14px',flex:1,minWidth:150}}>
           <div style=${{fontSize:12,fontWeight:700,color:'#cfe0f5',marginBottom:2}}>${m.icon} ${m.campaign}</div>
-          <div style=${{fontSize:10,color:'#5a8ab0'}}>${m.channel}</div>
-          <div style=${{fontSize:11,color:'#5a8ab0',marginTop:3}}>${app}/${items.length} approved${pend>0?html` · <span style=${{color:'#fbbf24'}}>${pend} need review</span>`:'✓'}</div>
+          <div style=${{fontSize:10,color:'#5a8ab0',marginBottom:3}}>${m.channel}</div>
+          <div style=${{fontSize:11,color:'#5a8ab0'}}>${app}/${items.length} approved${pend>0?html` · <span style=${{color:'#fbbf24'}}>${pend} need approval</span>`:' ✓'}</div>
         </div>`;
       })}
     </div>
@@ -926,8 +998,7 @@ function ScheduleTab({schedule}){
     </div>`}
 
     ${upcoming.length===0&&past.length===0&&html`<div style=${{textAlign:'center',padding:'60px 20px',color:'#274466'}}>
-      <div style=${{fontSize:28,marginBottom:10}}>📅</div>
-      <div>No content for this campaign.</div>
+      <div style=${{fontSize:28,marginBottom:10}}>📅</div><div>No content for this filter.</div>
     </div>`}
   </div>`;
 }
@@ -1075,16 +1146,21 @@ function App(){
           </div>`)}
         </div>
 
-        <!-- Campaign filter chips -->
+        <!-- Campaign filter chips (Content tab — flat, media assets only have real_gains as distinct campaign) -->
         <div style=${{display:'flex',gap:6,flexWrap:'wrap',marginBottom:10}}>
-          ${SCHED_CAMPAIGNS.map(({k,l,icon,color})=>{
+          ${[
+            {k:'all',        l:'All Campaigns', color:'#4a86f5'},
+            {k:'real_gains', l:'🏓 Real Gains',  color:'#2dd4bf'},
+            {k:'social',     l:'📸📘 TDOW Social',color:'#fb923c'},
+            {k:'email',      l:'📧 TDOW Email',  color:'#4a86f5'},
+          ].map(({k,l,color})=>{
             const cnt=k==='all'?mediaAssets.length:mediaAssets.filter(a=>assetCampaign(a)===k).length;
             const active=filterCampaign===k;
             return html`<button key=${k} onClick=${()=>setFilterCampaign(k)} style=${{
               background:active?color+'22':'transparent',color:active?color:'#5a8ab0',
               border:`0.5px solid ${active?color+'55':'#17304e'}`,
               borderRadius:20,padding:'4px 13px',fontSize:12,fontWeight:active?700:400,cursor:'pointer'
-            }}>${icon?icon+' ':''} ${l} (${cnt})</button>`;
+            }}>${l} (${cnt})</button>`;
           })}
         </div>
 
