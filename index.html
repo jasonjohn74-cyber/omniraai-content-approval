@@ -373,7 +373,6 @@ function MediaAssetCard({asset,onUpdate,onArchive,onDelete,weekInfo}){
         method:'PATCH',headers:{...SBH,'Prefer':'return=minimal'},
         body:JSON.stringify({full_content:fc,updated_at:new Date().toISOString()})
       });
-      setCaptionEditing(false);
     }catch(e){alert('Save failed: '+e.message);}
     setCaptionBusy(false);
   }
@@ -399,7 +398,6 @@ function MediaAssetCard({asset,onUpdate,onArchive,onDelete,weekInfo}){
           body:JSON.stringify({full_content:fc,updated_at:new Date().toISOString()})
         });
         setCaptionNote('');
-        setCaptionEditing(false);
       }else{alert('Claude returned empty response.');}
     }catch(e){alert('Caption rewrite failed: '+e.message);}
     setCaptionBusy(false);
