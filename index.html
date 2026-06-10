@@ -242,6 +242,10 @@ function MediaAssetCard({asset,onUpdate,onArchive,onDelete,weekInfo}){
   const[restoring,setRestoring]=useState(false);
   const[posting,setPosting]=useState(false);
   const[postResult,setPostResult]=useState(null);
+  const[captionEditing,setCaptionEditing]=useState(false);
+  const[captionText,setCaptionText]=useState(weekInfo?.post_caption||'');
+  const[captionNote,setCaptionNote]=useState('');
+  const[captionBusy,setCaptionBusy]=useState(false);
   const fileRef=useRef(null);
   const refInputRef=useRef(null);
 
@@ -355,6 +359,48 @@ function MediaAssetCard({asset,onUpdate,onArchive,onDelete,weekInfo}){
     setPosting(false);
   }
 
+  async function saveCaptionEdit(){
+    if(!weekInfo?.ca_id)return;
+    setCaptionBusy(true);
+    try{
+      const r=await fetch(`${SB_URL}/rest/v1/content_approvals?id=eq.${weekInfo.ca_id}&select=full_content`,{headers:SBH});
+      const recs=await r.json();
+      const fc={...(recs?.[0]?.full_content||{}),post_caption:captionText};
+      await fetch(`${SB_URL}/rest/v1/content_approvals?id=eq.${weekInfo.ca_id}`,{
+        method:'PATCH',headers:{...SBH,'Prefer':'return=minimal'},
+        body:JSON.stringify({full_content:fc,updated_at:new Date().toISOString()})
+      });
+      setCaptionEditing(false);
+    }catch(e){alert('Save failed: '+e.message);}
+    setCaptionBusy(false);
+  }
+  async function doRewriteCaption(){
+    if(!captionNote.trim()){alert('Add notes so AI knows how to rewrite the caption.');return;}
+    if(!weekInfo?.ca_id)return;
+    setCaptionBusy(true);
+    const topic=asset.asset_name||'pickleball drill';
+    const sys='You are an expert social media copywriter for Titan Ball Machines MY, a pickleball equipment brand in Malaysia. Write engaging, energetic captions for Instagram and Facebook.';
+    const usr=`Write a new Instagram/Facebook caption for a "Real Gains with Titan" post.\n\nTopic: ${topic}\nWeek: ${weekInfo.week_number}\nCurrent caption: ${captionText||'(not set — auto-generated from topic)'}\n\nRevision notes: ${captionNote}\n\nWrite ONLY the caption. Include relevant pickleball hashtags at the end. No preamble or labels.`;
+    try{
+      const res=await fetch(`${N8N}/webhook/claude-proxy`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({system:sys,prompt:usr})});
+      const raw=await res.text();
+      let data;try{data=JSON.parse(raw);}catch{throw new Error('Bad response: '+raw.slice(0,100));}
+      const newText=(data?.content?.[0]?.text||data?.[0]?.content?.[0]?.text||data?.body?.content?.[0]?.text||'').trim();
+      if(newText){
+        setCaptionText(newText);
+        const r2=await fetch(`${SB_URL}/rest/v1/content_approvals?id=eq.${weekInfo.ca_id}&select=full_content`,{headers:SBH});
+        const recs=await r2.json();
+        const fc={...(recs?.[0]?.full_content||{}),post_caption:newText};
+        await fetch(`${SB_URL}/rest/v1/content_approvals?id=eq.${weekInfo.ca_id}`,{
+          method:'PATCH',headers:{...SBH,'Prefer':'return=minimal'},
+          body:JSON.stringify({full_content:fc,updated_at:new Date().toISOString()})
+        });
+        setCaptionNote('');
+        setCaptionEditing(false);
+      }else{alert('Claude returned empty response.');}
+    }catch(e){alert('Caption rewrite failed: '+e.message);}
+    setCaptionBusy(false);
+  }
   async function handleManualUpload(e){
     const file=e.target.files?.[0];
     if(!file)return;
@@ -492,6 +538,33 @@ function MediaAssetCard({asset,onUpdate,onArchive,onDelete,weekInfo}){
           }
         </div>`}
       </div>
+
+      ${weekInfo&&html`<div style=${{borderTop:`0.5px solid rgba(45,212,191,0.2)`,marginTop:10,paddingTop:12}}>
+        <div style=${{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:8}}>
+          <span style=${{color:'#2dd4bf',fontSize:11,fontWeight:700}}>📝 Post Caption (IG + FB)</span>
+          ${!captionEditing&&html`<button onClick=${()=>setCaptionEditing(true)} style=${{background:'transparent',border:`0.5px solid ${C.bdB}`,borderRadius:4,color:C.dm,padding:'3px 9px',fontSize:10,cursor:'pointer'}}>✏ Edit</button>`}
+        </div>
+        ${captionEditing
+          ?html`<div>
+            <textarea value=${captionText} onInput=${e=>setCaptionText(e.target.value)} autoFocus
+              style=${{background:C.s2,border:`1px solid rgba(45,212,191,0.4)`,borderRadius:6,padding:'10px 12px',fontSize:12,lineHeight:1.7,color:C.tx,width:'100%',resize:'vertical',minHeight:120,outline:'none'}}/>
+            <textarea placeholder="AI rewrite notes — describe tone, angle, key message (optional)…" value=${captionNote} onInput=${e=>setCaptionNote(e.target.value)}
+              style=${{background:C.s2,border:`0.5px solid ${C.bd}`,borderRadius:6,color:C.tx,padding:'7px 10px',fontSize:11,width:'100%',resize:'vertical',minHeight:40,outline:'none',marginTop:6,lineHeight:1.5}}/>
+            <div style=${{display:'flex',gap:7,marginTop:7,flexWrap:'wrap'}}>
+              <button onClick=${saveCaptionEdit} disabled=${captionBusy} style=${{background:'rgba(45,212,191,0.18)',color:'#2dd4bf',border:`0.5px solid rgba(45,212,191,0.4)`,borderRadius:5,padding:'5px 14px',fontSize:11,fontWeight:600,cursor:captionBusy?'default':'pointer',opacity:captionBusy?0.6:1}}>
+                ${captionBusy?'Saving…':'💾 Save Caption'}
+              </button>
+              ${captionNote.trim()&&html`<button onClick=${doRewriteCaption} disabled=${captionBusy} style=${{background:captionBusy?`${C.pu}15`:'transparent',color:C.pu,border:`0.5px solid ${C.pu}`,borderRadius:5,padding:'5px 14px',fontSize:11,cursor:captionBusy?'default':'pointer',opacity:captionBusy?0.6:1}}>
+                ${captionBusy?'🤖 Rewriting…':'🤖 Rewrite with AI'}
+              </button>`}
+              <button onClick=${()=>{setCaptionEditing(false);setCaptionText(weekInfo?.post_caption||'');setCaptionNote('');}} style=${{background:'transparent',border:`0.5px solid ${C.bd}`,borderRadius:5,color:C.dm,padding:'5px 11px',fontSize:11,cursor:'pointer'}}>Cancel</button>
+            </div>
+          </div>`
+          :html`<div style=${{background:C.s2,border:`0.5px solid rgba(45,212,191,0.15)`,borderRadius:6,padding:'10px 12px',fontSize:12,color:captionText?C.tx:C.mt,lineHeight:1.7,whiteSpace:'pre-wrap',maxHeight:130,overflowY:'auto'}}>
+            ${captionText||'No custom caption set — publisher auto-generates from copy + footer hashtags. Click ✏ Edit to set a custom one.'}
+          </div>`
+        }
+      </div>`}
 
       <!-- Action area -->
       ${isActionable&&html`<div style=${{borderTop:`0.5px solid ${C.bd}`,paddingTop:12}}>
@@ -892,14 +965,22 @@ function SocialCaptionCard({ca,onUpdate}){
         </div>
       </div>`:''}
       ${isApproved?html`<div style=${{marginTop:14,paddingTop:14,borderTop:`0.5px solid ${C.bd}`}}>
-        <div style=${{display:'flex',alignItems:'center',gap:10,flexWrap:'wrap',marginBottom:postResult?8:0}}>
+        <div style=${{display:'flex',alignItems:'center',gap:10,flexWrap:'wrap',marginBottom:8}}>
           <span style=${{color:C.ok,fontSize:12}}>✓ Approved — fires Wednesday ${fmtDay(ca.scheduled_for)}</span>
           <button onClick=${doPostNow} disabled=${busy||posting} style=${{background:posting?'transparent':`${C.ok}18`,color:C.ok,border:`0.5px solid ${C.ok}50`,borderRadius:6,padding:'5px 14px',fontSize:12,fontWeight:700,cursor:(busy||posting)?'default':'pointer',opacity:(busy||posting)?0.6:1}}>
             ${posting?'⏳ Firing…':'🚀 Post Now'}
           </button>
           <button onClick=${doReopen} disabled=${busy} style=${{background:'transparent',color:C.dm,border:`0.5px solid ${C.bd}`,borderRadius:6,padding:'5px 12px',fontSize:11,cursor:'pointer',opacity:busy?0.6:1}}>Re-open for Revision</button>
         </div>
-        ${postResult?html`<div style=${{padding:'6px 10px',borderRadius:6,background:postResult.ok?`${C.ok}12`:`${C.er}12`,color:postResult.ok?C.ok:C.er,fontSize:11}}>${postResult.ok?'✓ ':'✗ '}${postResult.msg}</div>`:''}
+        ${postResult?html`<div style=${{padding:'6px 10px',borderRadius:6,background:postResult.ok?`${C.ok}12`:`${C.er}12`,color:postResult.ok?C.ok:C.er,fontSize:11,marginBottom:8}}>${postResult.ok?'✓ ':'✗ '}${postResult.msg}</div>`:''}
+        <div style=${{borderTop:`0.5px solid ${C.bd}`,paddingTop:10,marginTop:4}}>
+          <textarea placeholder="Caption revision notes for AI rewrite — describe what to change…" value=${note} onInput=${e=>setNote(e.target.value)}
+            style=${{background:C.s2,border:`0.5px solid ${C.bd}`,borderRadius:6,color:C.tx,padding:'8px 11px',fontSize:11,width:'100%',resize:'vertical',minHeight:44,outline:'none',marginBottom:7,lineHeight:1.5}}/>
+          <button onClick=${doRevise} disabled=${busy||regenerating} style=${{background:regenerating?`${C.pu}20`:'transparent',color:C.pu,border:`0.5px solid ${C.pu}`,borderRadius:6,padding:'6px 14px',fontSize:12,cursor:(busy||regenerating)?'default':'pointer',opacity:(busy||regenerating)?0.8:1}}>
+            ${regenerating?'🤖 Rewriting…':'✏ Revise Caption with AI'}
+          </button>
+          <span style=${{color:C.mt,fontSize:10,marginLeft:8}}>Rewrite drops back to pending for re-approval.</span>
+        </div>
       </div>`:''}
       ${ca.status==='skipped'?html`<div style=${{marginTop:14,paddingTop:14,borderTop:`0.5px solid ${C.bd}`,display:'flex',alignItems:'center',gap:12}}>
         <span style=${{color:C.er,fontSize:12}}>✗ Skipped — will not post this Wednesday</span>
@@ -1426,7 +1507,7 @@ function App(){
     const rgMap={};
     sched.filter(s=>s.content_type==='real_gains').forEach(s=>{
       if(s.full_content?.asset_id){
-        rgMap[s.full_content.asset_id]={week_number:s.week_number,scheduled_for:s.scheduled_for,ca_status:s.status};
+        rgMap[s.full_content.asset_id]={week_number:s.week_number,scheduled_for:s.scheduled_for,ca_status:s.status,ca_id:s.id,post_caption:s.full_content?.post_caption||null};
       }
     });
     setRgSchedule(rgMap);
