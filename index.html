@@ -240,6 +240,8 @@ function MediaAssetCard({asset,onUpdate,onArchive,onDelete,weekInfo}){
   const[editingPrompt,setEditingPrompt]=useState(false);
   const[editedPrompt,setEditedPrompt]=useState(asset.prompt||'');
   const[restoring,setRestoring]=useState(false);
+  const[posting,setPosting]=useState(false);
+  const[postResult,setPostResult]=useState(null);
   const fileRef=useRef(null);
   const refInputRef=useRef(null);
 
@@ -343,6 +345,14 @@ function MediaAssetCard({asset,onUpdate,onArchive,onDelete,weekInfo}){
   }
   async function doPublish(){
     await onUpdate({...asset,status:'published',published_at:now()});
+  }
+  async function doPostNow(){
+    if(!weekInfo?.week_number)return;
+    if(!confirm(`Post Real Gains Wk${weekInfo.week_number} "${asset.asset_name||'this post'}" to IG + FB right now?`))return;
+    setPosting(true);setPostResult(null);
+    fetch(`${N8N}/webhook/real-gains-run`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({weekOverride:weekInfo.week_number,source:'app4_media_card'})}).catch(()=>{});
+    setPostResult({ok:true,msg:'Triggered — Telegram will confirm once posted (allow ~3 min for IG processing)'});
+    setPosting(false);
   }
 
   async function handleManualUpload(e){
@@ -538,15 +548,34 @@ function MediaAssetCard({asset,onUpdate,onArchive,onDelete,weekInfo}){
 
       ${isApproved&&html`<div style=${{borderTop:`0.5px solid ${C.bd}`,paddingTop:12}}>
         <div style=${{color:C.ok,fontSize:11,marginBottom:10}}>✓ Approved ${fmtdt(asset.approved_at)}</div>
-        <div style=${{display:'flex',gap:8,flexWrap:'wrap'}}>
-          <button onClick=${doPublish} style=${{background:C.tl,color:'#001a18',border:'none',borderRadius:6,padding:'8px 18px',fontSize:13,fontWeight:700,cursor:'pointer'}}>
-            🚀 Mark as Published
+        ${weekInfo&&html`<div style=${{marginBottom:10}}>
+          <button onClick=${doPostNow} disabled=${posting}
+            style=${{background:posting?C.ok+'70':C.ok,color:'#001a10',border:'none',borderRadius:6,padding:'8px 20px',fontSize:13,fontWeight:700,cursor:posting?'default':'pointer'}}>
+            ${posting?'⏳ Firing…':'🚀 Post Now to IG + FB'}
           </button>
-          <button onClick=${async()=>{await onUpdate({...asset,status:'pending_review',approved_at:null});}} style=${{background:'transparent',color:'#fbbf24',border:'0.5px solid rgba(251,191,36,0.5)',borderRadius:6,padding:'8px 14px',fontSize:13,cursor:'pointer'}} title="Re-open this asset so you can revise copy or regenerate the image before publishing">
+          ${postResult&&html`<div style=${{marginTop:6,fontSize:11,color:postResult.ok?C.ok:'#f87171'}}>${postResult.msg}</div>`}
+        </div>`}
+        <div style=${{display:'flex',gap:8,flexWrap:'wrap'}}>
+          ${weekInfo
+            ?html`<button onClick=${doPublish}
+                style=${{background:'transparent',color:'#5a8ab0',border:`0.5px solid #17304e`,borderRadius:6,padding:'7px 14px',fontSize:12,cursor:'pointer'}}
+                title="Mark as published without posting — use if you posted manually outside the system">
+                ✓ Mark Published Manually
+              </button>`
+            :html`<button onClick=${doPublish}
+                style=${{background:C.tl,color:'#001a18',border:'none',borderRadius:6,padding:'8px 18px',fontSize:13,fontWeight:700,cursor:'pointer'}}>
+                🚀 Mark as Published
+              </button>`
+          }
+          <button onClick=${async()=>{await onUpdate({...asset,status:'pending_review',approved_at:null});}}
+            style=${{background:'transparent',color:'#fbbf24',border:'0.5px solid rgba(251,191,36,0.5)',borderRadius:6,padding:'7px 14px',fontSize:13,cursor:'pointer'}}
+            title="Re-open this asset so you can revise copy or regenerate the image before publishing">
             ✏️ Re-open for Revision
           </button>
         </div>
-        <div style=${{color:'#5a8ab0',fontSize:10,marginTop:6}}>Re-open returns this to Pending so you can revise or regenerate before publishing.</div>
+        <div style=${{color:'#5a8ab0',fontSize:10,marginTop:6}}>
+          ${weekInfo?'"Post Now" fires the Real Gains publisher to IG + FB. "Mark Manually" is for posts done outside the system.':'Re-open returns this to Pending so you can revise or regenerate before publishing.'}
+        </div>
       </div>`}
 
       ${asset.status==='published'&&html`<div style=${{borderTop:`0.5px solid ${C.bd}`,paddingTop:10}}>
@@ -1216,8 +1245,22 @@ function ScheduleTab({schedule,clients,schedClientMap}){
   const[l1,setL1]=useState('all');
   const[l2,setL2]=useState('all');
   const[filterClient,setFilterClient]=useState('all');
+  const[firingRows,setFiringRows]=useState({});
+  const[fireResults,setFireResults]=useState({});
   const now=new Date();
   const daysAway=d=>Math.ceil((new Date(d)-now)/(1000*60*60*24));
+  const FIRE_HOOKS={email:'email-blast-run',social:'social-sync-run',real_gains:'real-gains-run'};
+  async function fireRow(item){
+    if(firingRows[item.id])return;
+    const wh=FIRE_HOOKS[item.content_type];
+    if(!wh){alert('No webhook configured for this content type.');return;}
+    const label={'email':'Email Blast','social':'Social Post','real_gains':'Real Gains Post'}[item.content_type]||item.content_type;
+    if(!confirm(`Fire ${label} Wk${item.week_number} now? It will post to the live platforms immediately.`))return;
+    setFiringRows(p=>({...p,[item.id]:true}));
+    fetch(`${N8N}/webhook/${wh}`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({weekOverride:item.week_number,source:'app4_schedule'})}).catch(()=>{});
+    setFireResults(p=>({...p,[item.id]:{ok:true}}));
+    setFiringRows(p=>({...p,[item.id]:false}));
+  }
 
   const ctFilter=resolveCtFilter(l1,l2);
   const matchesCt=s=>{
@@ -1264,9 +1307,16 @@ function ScheduleTab({schedule,clients,schedClientMap}){
         <span style=${{color:'#5a8ab0',fontSize:11,flexShrink:0}}>
           📅 ${fmtDay(item.scheduled_for)}${da===0?' · today':da===1?' · tomorrow':da>0&&da<=7?` · in ${da}d`:da<0&&!dim?' · ⚠ overdue':''}
         </span>
-        <div style=${{display:'flex',gap:5,alignItems:'center',flexShrink:0}}>
+        <div style=${{display:'flex',gap:5,alignItems:'center',flexShrink:0,flexWrap:'wrap'}}>
           ${isUrgent?html`<span style=${{background:'rgba(251,191,36,0.12)',color:'#fbbf24',border:'0.5px solid rgba(251,191,36,0.35)',borderRadius:10,padding:'2px 7px',fontSize:10,fontWeight:700}}>⚡ SOON</span>`:''}
           <span style=${{background:`${st.c}15`,color:st.c,border:`0.5px solid ${st.c}35`,borderRadius:20,padding:'2px 9px',fontSize:11,fontWeight:600,whiteSpace:'nowrap'}}>${st.icon} ${st.l}</span>
+          ${item.status==='approved'&&!dim&&html`<button
+            onClick=${e=>{e.stopPropagation();fireRow(item);}}
+            disabled=${firingRows[item.id]}
+            style=${{background:firingRows[item.id]?'rgba(52,211,153,0.08)':'rgba(52,211,153,0.15)',color:'#34d399',border:'0.5px solid rgba(52,211,153,0.4)',borderRadius:6,padding:'3px 10px',fontSize:11,fontWeight:700,cursor:firingRows[item.id]?'default':'pointer',whiteSpace:'nowrap'}}>
+            ${firingRows[item.id]?'⏳ Firing…':'🚀 Post Now'}
+          </button>`}
+          ${fireResults[item.id]&&html`<span style=${{color:'#34d399',fontSize:10,whiteSpace:'nowrap'}}>✓ Triggered — watch Telegram</span>`}
         </div>
       </div>
     </div>`;
