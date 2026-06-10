@@ -252,8 +252,9 @@ function MediaAssetCard({asset,onUpdate,onArchive,onDelete,weekInfo}){
   const[draftSaved,setDraftSaved]=useState(!!(asset.data?.draft_saved));
   const fileRef=useRef(null);
   const refInputRef=useRef(null);
-  // Sync textarea when parent loads/refreshes post_caption from Supabase
-  useEffect(()=>{setCaptionText(weekInfo?.post_caption||'');},[weekInfo?.post_caption]);
+  const[captionKey,setCaptionKey]=useState(0);
+  // Force textarea remount (via key) whenever post_caption changes externally (data refresh)
+  useEffect(()=>{setCaptionText(weekInfo?.post_caption||'');setCaptionKey(k=>k+1);},[weekInfo?.post_caption]);
 
   const ch=CHANNEL_META[asset.channel]||{icon:'🖼',label:asset.channel,dims:'',type:'image'};
   const isVideo=asset.asset_type==='video'||asset.asset_url?.match(/\.(mp4|mov|webm)/i);
@@ -395,6 +396,7 @@ function MediaAssetCard({asset,onUpdate,onArchive,onDelete,weekInfo}){
       const newText=(data?.content?.[0]?.text||data?.[0]?.content?.[0]?.text||data?.body?.content?.[0]?.text||'').trim();
       if(newText){
         setCaptionText(newText);
+        setCaptionKey(k=>k+1);
         setCopyEditMode('manual');
         const r2=await fetch(`${SB_URL}/rest/v1/content_approvals?id=eq.${weekInfo.ca_id}&select=full_content`,{headers:SBH});
         const recs=await r2.json();
@@ -599,7 +601,7 @@ function MediaAssetCard({asset,onUpdate,onArchive,onDelete,weekInfo}){
             </div>
           </div>
           ${copyEditMode==='manual'
-            ?html`<textarea value=${captionText} onChange=${e=>setCaptionText(e.target.value)}
+            ?html`<textarea key=${captionKey} defaultValue=${captionText} onChange=${e=>setCaptionText(e.target.value)}
                 placeholder="Type the post caption here — what will be published to IG + FB…"
                 style=${{background:C.s2,border:`1px solid ${C.bdB}`,borderRadius:6,padding:'10px 12px',fontSize:12,lineHeight:1.7,color:C.tx,width:'100%',resize:'vertical',minHeight:100,outline:'none'}}/>`
             :html`<textarea value=${captionNote} onChange=${e=>setCaptionNote(e.target.value)}
@@ -935,8 +937,9 @@ function SocialCaptionCard({ca,onUpdate}){
   const[copyEditMode,setCopyEditMode]=useState('manual');
   const[note,setNote]=useState('');
   const[busy,setBusy]=useState(false);
-  // Sync textarea when parent refreshes CA data from Supabase
-  useEffect(()=>{setCopyText(ca.full_content?.caption||ca.preview_text||'');},[ca.full_content?.caption,ca.preview_text]);
+  const[copyVersion,setCopyVersion]=useState(0);
+  // Force textarea remount whenever CA caption changes externally (data refresh or AI rewrite saved)
+  useEffect(()=>{setCopyText(ca.full_content?.caption||ca.preview_text||'');setCopyVersion(v=>v+1);},[ca.full_content?.caption,ca.preview_text]);
   const[regenerating,setRegenerating]=useState(false);
   const[copied,setCopied]=useState(false);
   const[posting,setPosting]=useState(false);
@@ -988,6 +991,7 @@ function SocialCaptionCard({ca,onUpdate}){
         const newText=(data?.content?.[0]?.text||data?.[0]?.content?.[0]?.text||data?.body?.content?.[0]?.text||'').trim();
         if(newText){
           setCopyText(newText);
+          setCopyVersion(v=>v+1);
           setCopyEditMode('manual');
           const fc={...ca.full_content,caption:newText,draft_saved:true};
           await onUpdate(ca.id,{full_content:fc,preview_text:newText});
@@ -1068,7 +1072,7 @@ function SocialCaptionCard({ca,onUpdate}){
               </div>
             </div>
             ${copyEditMode==='manual'
-              ?html`<textarea value=${copyText} onChange=${e=>setCopyText(e.target.value)}
+              ?html`<textarea key=${copyVersion} defaultValue=${copyText} onChange=${e=>setCopyText(e.target.value)}
                   placeholder="Type the post caption here — what will be published to IG + FB…"
                   style=${{background:C.s2,border:`1px solid ${C.bdB}`,borderRadius:6,padding:'10px 12px',fontSize:12,lineHeight:1.75,color:C.tx,width:'100%',resize:'vertical',minHeight:140,outline:'none'}}/>`
               :html`<textarea value=${copyNote} onInput=${e=>setCopyNote(e.target.value)}
