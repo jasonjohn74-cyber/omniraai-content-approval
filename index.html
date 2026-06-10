@@ -793,7 +793,7 @@ function SocialCaptionCard({ca,onUpdate}){
     setPostResult({ok:true,msg:'Triggered — Telegram will confirm once posted (allow ~3 min for IG Reel processing)'});
     setPosting(false);
   }
-  async function saveEdit(){await onUpdate(ca.id,{full_content:{...ca.full_content,caption:editText}});setEditing(false);}
+  async function saveEdit(){await onUpdate(ca.id,{full_content:{...ca.full_content,caption:editText},preview_text:editText});setEditing(false);}
   async function copyCaption(){try{await navigator.clipboard.writeText(caption);setCopied(true);setTimeout(()=>setCopied(false),2000);}catch{}}
 
   async function doRevise(){
@@ -806,7 +806,7 @@ function SocialCaptionCard({ca,onUpdate}){
       const raw=await res.text();
       let data;try{data=JSON.parse(raw);}catch{throw new Error('Bad response: '+raw.slice(0,100));}
       const newText=(data?.content?.[0]?.text||data?.[0]?.content?.[0]?.text||data?.body?.content?.[0]?.text||'').trim();
-      if(newText){await onUpdate(ca.id,{status:'pending',full_content:{...ca.full_content,caption:newText}});setNote('');}
+      if(newText){await onUpdate(ca.id,{status:'pending',full_content:{...ca.full_content,caption:newText},preview_text:newText});setNote('');}
       else{alert('Claude returned empty response.');}
     }catch(e){alert('Revision failed: '+e.message);}
     setRegenerating(false);
