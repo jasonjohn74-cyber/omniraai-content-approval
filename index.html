@@ -155,7 +155,7 @@ const db={
     catch{return[];}
   },
   async getSocialCAs(){
-    try{const r=await fetch(`${SB_URL}/rest/v1/content_approvals?content_type=eq.social&select=id,week_number,subject,status,scheduled_for,approved_at,full_content&order=week_number.asc`,{headers:SBH});const d=await r.json();return Array.isArray(d)?d:[];}
+    try{const r=await fetch(`${SB_URL}/rest/v1/content_approvals?content_type=eq.social&select=id,week_number,subject,status,scheduled_for,approved_at,full_content,preview_text&order=week_number.asc`,{headers:SBH});const d=await r.json();return Array.isArray(d)?d:[];}
     catch{return[];}
   },
   async updateSocialCA(id,patch){
@@ -242,10 +242,13 @@ function MediaAssetCard({asset,onUpdate,onArchive,onDelete,weekInfo}){
   const[restoring,setRestoring]=useState(false);
   const[posting,setPosting]=useState(false);
   const[postResult,setPostResult]=useState(null);
-  const[captionEditing,setCaptionEditing]=useState(false);
   const[captionText,setCaptionText]=useState(weekInfo?.post_caption||'');
   const[captionNote,setCaptionNote]=useState('');
   const[captionBusy,setCaptionBusy]=useState(false);
+  const[copyEditMode,setCopyEditMode]=useState('manual');
+  const[rejectMode,setRejectMode]=useState(false);
+  const[rejectRemark,setRejectRemark]=useState('');
+  const[draftSaved,setDraftSaved]=useState(!!(asset.data?.draft_saved));
   const fileRef=useRef(null);
   const refInputRef=useRef(null);
 
@@ -401,6 +404,43 @@ function MediaAssetCard({asset,onUpdate,onArchive,onDelete,weekInfo}){
     }catch(e){alert('Caption rewrite failed: '+e.message);}
     setCaptionBusy(false);
   }
+  async function doRequestCopyRevision(){
+    if(copyEditMode==='manual'){await saveCaptionEdit();}
+    else{await doRewriteCaption();}
+  }
+  async function doSaveAsDraft(){
+    setCaptionBusy(true);
+    if(weekInfo?.ca_id){
+      try{
+        const r=await fetch(`${SB_URL}/rest/v1/content_approvals?id=eq.${weekInfo.ca_id}&select=full_content`,{headers:SBH});
+        const recs=await r.json();
+        const fc={...(recs?.[0]?.full_content||{}),post_caption:captionText,draft_saved:true};
+        await fetch(`${SB_URL}/rest/v1/content_approvals?id=eq.${weekInfo.ca_id}`,{method:'PATCH',headers:{...SBH,'Prefer':'return=minimal'},body:JSON.stringify({full_content:fc,updated_at:new Date().toISOString()})});
+      }catch(e){console.error('Draft CA save failed:',e);}
+    }
+    await onUpdate({...asset,data:{...(asset.data||{}),draft_saved:true}});
+    setDraftSaved(true);
+    setCaptionBusy(false);
+  }
+  async function doSaveAndApprove(){
+    setCaptionBusy(true);
+    if(weekInfo?.ca_id&&captionText){
+      try{
+        const r=await fetch(`${SB_URL}/rest/v1/content_approvals?id=eq.${weekInfo.ca_id}&select=full_content`,{headers:SBH});
+        const recs=await r.json();
+        const fc={...(recs?.[0]?.full_content||{}),post_caption:captionText};
+        await fetch(`${SB_URL}/rest/v1/content_approvals?id=eq.${weekInfo.ca_id}`,{method:'PATCH',headers:{...SBH,'Prefer':'return=minimal'},body:JSON.stringify({full_content:fc,updated_at:new Date().toISOString()})});
+      }catch(e){console.error('Caption save on approve failed:',e);}
+    }
+    setCaptionBusy(false);
+    await onUpdate({...asset,status:'approved',approved_at:now(),feedback:feedback||null});
+  }
+  async function doConfirmReject(){
+    if(!rejectRemark.trim()&&!confirm('Reject without a reason?'))return;
+    await onUpdate({...asset,status:'rejected',feedback:rejectRemark||null});
+    await db.syncContentApproval(asset.id,'rejected');
+    setRejectMode(false);
+  }
   async function handleManualUpload(e){
     const file=e.target.files?.[0];
     if(!file)return;
@@ -446,7 +486,10 @@ function MediaAssetCard({asset,onUpdate,onArchive,onDelete,weekInfo}){
           ${asset.provider||'ai'} · Round ${asset.revision_round||1}
         </span>
       </div>
-      <${Badge} status=${asset.status} />
+      <div style=${{display:'flex',alignItems:'center',gap:6,flexShrink:0}}>
+        ${(isActionable&&draftSaved)&&html`<span style=${{background:'rgba(251,191,36,0.12)',color:'#fbbf24',border:'0.5px solid rgba(251,191,36,0.3)',borderRadius:10,padding:'2px 8px',fontSize:10,fontWeight:600}}>📝 Saved Revision</span>`}
+        <${Badge} status=${asset.status} />
+      </div>
     </div>
 
     <div style=${{padding:'14px'}}>
@@ -539,83 +582,94 @@ function MediaAssetCard({asset,onUpdate,onArchive,onDelete,weekInfo}){
         </div>`}
       </div>
 
-      ${weekInfo&&html`<div style=${{borderTop:`0.5px solid rgba(45,212,191,0.2)`,marginTop:10,paddingTop:12}}>
-        <div style=${{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:8}}>
-          <span style=${{color:'#2dd4bf',fontSize:11,fontWeight:700}}>📝 Post Caption (IG + FB)</span>
-          ${!captionEditing&&html`<button onClick=${()=>setCaptionEditing(true)} style=${{background:'transparent',border:`0.5px solid ${C.bdB}`,borderRadius:4,color:C.dm,padding:'3px 9px',fontSize:10,cursor:'pointer'}}>✏ Edit</button>`}
+      ${isActionable&&html`<div>
+
+        <!-- ── COPY EDIT ── -->
+        <div style=${{borderTop:`0.5px solid ${C.bd}`,paddingTop:14,marginTop:8}}>
+          <div style=${{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:10}}>
+            <span style=${{fontSize:11,fontWeight:700,color:C.dm,letterSpacing:'0.4px',textTransform:'uppercase'}}>📝 Copy Edit</span>
+            <div style=${{display:'flex',background:C.s3,borderRadius:5,padding:2,border:`0.5px solid ${C.bd}`}}>
+              <button onClick=${()=>setCopyEditMode('manual')} style=${{background:copyEditMode==='manual'?C.s1:'transparent',border:'none',borderRadius:3,color:copyEditMode==='manual'?C.tx:C.mt,padding:'3px 10px',fontSize:11,cursor:'pointer',fontWeight:copyEditMode==='manual'?600:400,transition:'all 0.15s'}}>✏ Edit Directly</button>
+              <button onClick=${()=>setCopyEditMode('ai')} style=${{background:copyEditMode==='ai'?C.s1:'transparent',border:'none',borderRadius:3,color:copyEditMode==='ai'?C.tx:C.mt,padding:'3px 10px',fontSize:11,cursor:'pointer',fontWeight:copyEditMode==='ai'?600:400,transition:'all 0.15s'}}>🤖 AI Feedback</button>
+            </div>
+          </div>
+          ${copyEditMode==='manual'
+            ?html`<textarea value=${captionText} onInput=${e=>setCaptionText(e.target.value)}
+                placeholder="Type the post caption here — what will be published to IG + FB…"
+                style=${{background:C.s2,border:`1px solid ${C.bdB}`,borderRadius:6,padding:'10px 12px',fontSize:12,lineHeight:1.7,color:C.tx,width:'100%',resize:'vertical',minHeight:100,outline:'none'}}/>`
+            :html`<textarea value=${captionNote} onInput=${e=>setCaptionNote(e.target.value)}
+                placeholder="Describe what to change — tone, angle, what to add or remove, key message…"
+                style=${{background:C.s2,border:`1px solid ${C.bdB}`,borderRadius:6,padding:'10px 12px',fontSize:12,lineHeight:1.6,color:C.tx,width:'100%',resize:'vertical',minHeight:72,outline:'none'}}/>`
+          }
+          <button onClick=${doRequestCopyRevision} disabled=${captionBusy}
+            style=${{marginTop:8,background:`${C.ac}14`,color:C.ac,border:`0.5px solid ${C.ac}45`,borderRadius:6,padding:'7px 16px',fontSize:12,fontWeight:600,cursor:captionBusy?'default':'pointer',opacity:captionBusy?0.6:1}}>
+            ${captionBusy?(copyEditMode==='ai'?'🤖 Rewriting…':'Saving…'):(copyEditMode==='ai'?'🤖 Request Copy Revision':'💾 Request Copy Revision')}
+          </button>
         </div>
-        ${captionEditing
-          ?html`<div>
-            <textarea value=${captionText} onInput=${e=>setCaptionText(e.target.value)} autoFocus
-              style=${{background:C.s2,border:`1px solid rgba(45,212,191,0.4)`,borderRadius:6,padding:'10px 12px',fontSize:12,lineHeight:1.7,color:C.tx,width:'100%',resize:'vertical',minHeight:120,outline:'none'}}/>
-            <textarea placeholder="AI rewrite notes — describe tone, angle, key message (optional)…" value=${captionNote} onInput=${e=>setCaptionNote(e.target.value)}
-              style=${{background:C.s2,border:`0.5px solid ${C.bd}`,borderRadius:6,color:C.tx,padding:'7px 10px',fontSize:11,width:'100%',resize:'vertical',minHeight:40,outline:'none',marginTop:6,lineHeight:1.5}}/>
-            <div style=${{display:'flex',gap:7,marginTop:7,flexWrap:'wrap'}}>
-              <button onClick=${saveCaptionEdit} disabled=${captionBusy} style=${{background:'rgba(45,212,191,0.18)',color:'#2dd4bf',border:`0.5px solid rgba(45,212,191,0.4)`,borderRadius:5,padding:'5px 14px',fontSize:11,fontWeight:600,cursor:captionBusy?'default':'pointer',opacity:captionBusy?0.6:1}}>
-                ${captionBusy?'Saving…':'💾 Save Caption'}
+
+        <!-- ── IMAGE / VIDEO / GRAPHICS EDIT ── -->
+        <div style=${{borderTop:`0.5px solid ${C.bd}`,paddingTop:14,marginTop:14}}>
+          <div style=${{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:10}}>
+            <span style=${{fontSize:11,fontWeight:700,color:C.dm,letterSpacing:'0.4px',textTransform:'uppercase'}}>🖼 Image / Video / Graphics Edit</span>
+            <div style=${{display:'flex',background:C.s3,borderRadius:5,padding:2,border:`0.5px solid ${C.bd}`}}>
+              <button onClick=${()=>setEditingPrompt(false)} style=${{background:!editingPrompt?C.s1:'transparent',border:'none',borderRadius:3,color:!editingPrompt?C.tx:C.mt,padding:'3px 10px',fontSize:11,cursor:'pointer',fontWeight:!editingPrompt?600:400,transition:'all 0.15s'}}>📝 Give Feedback</button>
+              <button onClick=${()=>{setEditingPrompt(true);setEditedPrompt(asset.prompt||'');}} style=${{background:editingPrompt?C.s1:'transparent',border:'none',borderRadius:3,color:editingPrompt?C.tx:C.mt,padding:'3px 10px',fontSize:11,cursor:'pointer',fontWeight:editingPrompt?600:400,transition:'all 0.15s'}}>✏ Edit Prompt</button>
+            </div>
+          </div>
+          ${editingPrompt
+            ?html`<textarea value=${editedPrompt} onInput=${e=>setEditedPrompt(e.target.value)}
+                style=${{background:C.s2,border:`1px solid ${C.pu}50`,borderRadius:6,padding:'10px 12px',fontSize:11,lineHeight:1.6,color:C.tx,width:'100%',resize:'vertical',minHeight:80,outline:'none',fontFamily:'monospace'}}/>`
+            :html`<div>
+              <textarea value=${feedback} onInput=${e=>setFeedback(e.target.value)} onPaste=${handleRefPaste}
+                placeholder="Describe what to change — composition, lighting, elements to add/remove, style, colour…"
+                style=${{background:C.s2,border:`1px solid ${C.bdB}`,borderRadius:6,padding:'10px 12px',fontSize:12,lineHeight:1.6,color:C.tx,width:'100%',resize:'vertical',minHeight:60,outline:'none'}}/>
+              <input ref=${refInputRef} type="file" accept="image/*" onChange=${e=>handleRefFiles(e.target.files)} style=${{display:'none'}} />
+              ${referenceImage
+                ?html`<div style=${{marginTop:8,border:`0.5px solid ${C.pu}40`,borderRadius:6,overflow:'hidden'}}>
+                  <div style=${{background:`${C.pu}15`,padding:'5px 10px',display:'flex',alignItems:'center',justifyContent:'space-between'}}>
+                    <span style=${{color:C.pu,fontSize:11,fontWeight:600}}>📎 Reference image attached</span>
+                    <button onClick=${()=>setReferenceImage(null)} style=${{background:'transparent',border:'none',color:C.pu,cursor:'pointer',fontSize:12,padding:'0 4px'}}>✕</button>
+                  </div>
+                  <img src=${referenceImage} style=${{width:'100%',maxHeight:160,objectFit:'contain',background:C.s2,display:'block'}} />
+                </div>`
+                :html`<div onDragOver=${e=>{e.preventDefault();setRefDragging(true);}} onDragLeave=${()=>setRefDragging(false)} onDrop=${handleRefDrop} onClick=${()=>refInputRef.current?.click()}
+                  style=${{marginTop:8,border:`1px dashed ${refDragging?C.pu:C.bd}`,background:refDragging?`${C.pu}08`:'transparent',borderRadius:6,padding:'8px 14px',cursor:'pointer',textAlign:'center',transition:'all 0.15s'}}>
+                  <span style=${{color:refDragging?C.pu:C.mt,fontSize:11}}>📎 Drag & drop a reference image, paste (Ctrl+V), or click to browse</span>
+                </div>`
+              }
+            </div>`
+          }
+          <button onClick=${editingPrompt?doRegenerateWithPrompt:doRequestRevision} disabled=${regenerating}
+            style=${{marginTop:8,background:`${C.pu}14`,color:C.pu,border:`0.5px solid ${C.pu}45`,borderRadius:6,padding:'7px 16px',fontSize:12,fontWeight:600,cursor:regenerating?'default':'pointer',opacity:regenerating?0.6:1}}>
+            ${regenerating?'🤖 Regenerating…':'🤖 Request Image Revision'}
+          </button>
+        </div>
+
+        <!-- ── BOTTOM ACTIONS ── -->
+        <div style=${{borderTop:`0.5px solid ${C.bd}`,paddingTop:14,marginTop:14}}>
+          ${rejectMode
+            ?html`<div>
+              <div style=${{color:C.er,fontSize:12,marginBottom:7,fontWeight:600}}>Why are you rejecting this? (saved for future reference)</div>
+              <textarea value=${rejectRemark} onInput=${e=>setRejectRemark(e.target.value)} autoFocus
+                placeholder="e.g. Campaign plan changed, wrong concept, replaced with different approach…"
+                style=${{background:C.s2,border:`1px solid ${C.er}50`,borderRadius:6,color:C.tx,padding:'8px 11px',fontSize:12,width:'100%',resize:'vertical',minHeight:60,outline:'none',marginBottom:10,lineHeight:1.5}}/>
+              <div style=${{display:'flex',gap:8}}>
+                <button onClick=${doConfirmReject} style=${{background:`${C.er}14`,color:C.er,border:`0.5px solid ${C.er}50`,borderRadius:6,padding:'7px 16px',fontSize:12,fontWeight:600,cursor:'pointer'}}>Confirm Reject</button>
+                <button onClick=${()=>{setRejectMode(false);setRejectRemark('');}} style=${{background:'transparent',color:C.dm,border:`0.5px solid ${C.bd}`,borderRadius:6,padding:'7px 14px',fontSize:12,cursor:'pointer'}}>Cancel</button>
+              </div>
+            </div>`
+            :html`<div style=${{display:'flex',gap:8,flexWrap:'wrap',alignItems:'center'}}>
+              <button onClick=${doSaveAsDraft} disabled=${captionBusy} style=${{background:`${C.ac}12`,color:C.ac,border:`0.5px solid ${C.ac}45`,borderRadius:6,padding:'8px 18px',fontSize:13,fontWeight:600,cursor:captionBusy?'default':'pointer',opacity:captionBusy?0.6:1}}>
+                ${captionBusy?'Saving…':'💾 Save as Draft'}
               </button>
-              ${captionNote.trim()&&html`<button onClick=${doRewriteCaption} disabled=${captionBusy} style=${{background:captionBusy?`${C.pu}15`:'transparent',color:C.pu,border:`0.5px solid ${C.pu}`,borderRadius:5,padding:'5px 14px',fontSize:11,cursor:captionBusy?'default':'pointer',opacity:captionBusy?0.6:1}}>
-                ${captionBusy?'🤖 Rewriting…':'🤖 Rewrite with AI'}
-              </button>`}
-              <button onClick=${()=>{setCaptionEditing(false);setCaptionText(weekInfo?.post_caption||'');setCaptionNote('');}} style=${{background:'transparent',border:`0.5px solid ${C.bd}`,borderRadius:5,color:C.dm,padding:'5px 11px',fontSize:11,cursor:'pointer'}}>Cancel</button>
-            </div>
-          </div>`
-          :html`<div style=${{background:C.s2,border:`0.5px solid rgba(45,212,191,0.15)`,borderRadius:6,padding:'10px 12px',fontSize:12,color:captionText?C.tx:C.mt,lineHeight:1.7,whiteSpace:'pre-wrap',maxHeight:130,overflowY:'auto'}}>
-            ${captionText||'No custom caption set — publisher auto-generates from copy + footer hashtags. Click ✏ Edit to set a custom one.'}
-          </div>`
-        }
-      </div>`}
-
-      <!-- Action area -->
-      ${isActionable&&html`<div style=${{borderTop:`0.5px solid ${C.bd}`,paddingTop:12}}>
-        <textarea
-          placeholder="Feedback for revision (required when requesting changes)…"
-          value=${feedback}
-          onInput=${e=>setFeedback(e.target.value)}
-          onPaste=${handleRefPaste}
-          style=${{background:C.s2,border:`0.5px solid ${C.bd}`,borderRadius:6,color:C.tx,padding:'8px 11px',fontSize:12,width:'100%',resize:'vertical',minHeight:56,outline:'none',marginBottom:10,lineHeight:1.5}}
-        />
-
-        <!-- Reference image zone -->
-        <input ref=${refInputRef} type="file" accept="image/*" onChange=${e=>handleRefFiles(e.target.files)} style=${{display:'none'}} />
-        ${referenceImage
-          ?html`<div style=${{marginBottom:10,border:`0.5px solid ${C.pu}40`,borderRadius:6,overflow:'hidden',position:'relative'}}>
-            <div style=${{background:`${C.pu}15`,padding:'6px 10px',display:'flex',alignItems:'center',justifyContent:'space-between'}}>
-              <span style=${{color:C.pu,fontSize:11,fontWeight:600}}>📎 Reference image attached</span>
-              <button onClick=${()=>setReferenceImage(null)} style=${{background:'transparent',border:'none',color:C.pu,cursor:'pointer',fontSize:13,padding:'0 4px'}}>✕ Remove</button>
-            </div>
-            <img src=${referenceImage} style=${{width:'100%',maxHeight:180,objectFit:'contain',background:C.s2,display:'block'}} />
-          </div>`
-          :html`<div
-            onDragOver=${e=>{e.preventDefault();setRefDragging(true);}}
-            onDragLeave=${()=>setRefDragging(false)}
-            onDrop=${handleRefDrop}
-            onClick=${()=>refInputRef.current?.click()}
-            style=${{
-              border:`1px dashed ${refDragging?C.pu:C.bd}`,
-              background:refDragging?`${C.pu}08`:'transparent',
-              borderRadius:6,padding:'10px 14px',marginBottom:10,
-              cursor:'pointer',textAlign:'center',
-              transition:'border-color 0.15s, background 0.15s'
-            }}>
-            <span style=${{color:refDragging?C.pu:C.mt,fontSize:11}}>
-              📎 Drag & drop a reference image, paste (Ctrl+V), or click to browse
-            </span>
-          </div>`
-        }
-
-        <div style=${{display:'flex',gap:8,flexWrap:'wrap'}}>
-          <button onClick=${doApprove} style=${{background:C.ok,color:'#0a1a0a',border:'none',borderRadius:6,padding:'8px 18px',fontSize:13,fontWeight:700,cursor:'pointer'}}>
-            ✓ Approve
-          </button>
-          <button onClick=${doRequestRevision} disabled=${regenerating}
-            style=${{background:regenerating?`${C.pu}20`:'transparent',color:C.pu,border:`0.5px solid ${C.pu}`,borderRadius:6,padding:'8px 14px',fontSize:13,cursor:regenerating?'default':'pointer'}}>
-            ${regenerating?'🤖 Regenerating…':`✏ Request AI Revision${referenceImage?' + Ref':''}`}
-          </button>
-          <button onClick=${doReject}
-            style=${{background:'transparent',color:C.er,border:`0.5px solid ${C.er}`,borderRadius:6,padding:'8px 14px',fontSize:13,cursor:'pointer'}}>
-            ✗ Reject
-          </button>
+              <button onClick=${doSaveAndApprove} disabled=${captionBusy} style=${{background:C.ok,color:'#0a1a0a',border:'none',borderRadius:6,padding:'8px 20px',fontSize:13,fontWeight:700,cursor:captionBusy?'default':'pointer',opacity:captionBusy?0.6:1}}>
+                ✓ Save & Approve
+              </button>
+              <button onClick=${()=>setRejectMode(true)} style=${{background:'transparent',color:C.er,border:`0.5px solid ${C.er}45`,borderRadius:6,padding:'8px 15px',fontSize:13,cursor:'pointer'}}>
+                ✗ Reject
+              </button>
+            </div>`
+          }
         </div>
       </div>`}
 
@@ -867,26 +921,31 @@ function CopyContentCard({item,onUpdate,onDelete,busy}){
 
 // ── SOCIAL CAPTION CARD ───────────────────────────────────────
 function SocialCaptionCard({ca,onUpdate}){
-  const[editing,setEditing]=useState(false);
-  const[editText,setEditText]=useState(ca.full_content?.caption||'');
+  const captionInit=ca.full_content?.caption||ca.preview_text||'';
+  const[copyText,setCopyText]=useState(captionInit);
+  const[copyNote,setCopyNote]=useState('');
+  const[copyEditMode,setCopyEditMode]=useState('manual');
   const[note,setNote]=useState('');
   const[busy,setBusy]=useState(false);
   const[regenerating,setRegenerating]=useState(false);
   const[copied,setCopied]=useState(false);
   const[posting,setPosting]=useState(false);
   const[postResult,setPostResult]=useState(null);
+  const[newIgUrl,setNewIgUrl]=useState(ca.full_content?.igVideoUrl||'');
+  const[newYtUrl,setNewYtUrl]=useState(ca.full_content?.youtubeUrl||ca.full_content?.youtube_url||'');
+  const[rejectMode,setRejectMode]=useState(false);
+  const[rejectRemark,setRejectRemark]=useState('');
+  const[draftSaved,setDraftSaved]=useState(!!(ca.full_content?.draft_saved));
 
   const drillName=(ca.subject||'').replace(/^TDOW Social Wk\d+:\s*/i,'');
+  const caption=ca.full_content?.caption||ca.preview_text||'';
   const yt=ca.full_content?.youtubeUrl||ca.full_content?.youtube_url||'';
   const igV=ca.full_content?.igVideoUrl||'';
-  const caption=ca.full_content?.caption||'';
   const isActionable=ca.status==='pending'||ca.status==='revision_requested';
   const isApproved=ca.status==='approved';
   const borderColor=ca.status==='pending'?C.bdB:ca.status==='approved'?C.ok+'50':ca.status==='revision_requested'?C.pu+'50':C.bd;
   const st=CA_STATUS_MAP[ca.status]||{l:ca.status,c:C.dm,icon:''};
 
-  async function doApprove(){setBusy(true);await onUpdate(ca.id,{status:'approved',approved_at:new Date().toISOString()});setBusy(false);}
-  async function doSkip(){if(!confirm('Skip this week\'s social post? It won\'t be posted on Wednesday.'))return;setBusy(true);await onUpdate(ca.id,{status:'skipped'});setBusy(false);}
   async function doReopen(){setBusy(true);await onUpdate(ca.id,{status:'pending',approved_at:null});setBusy(false);}
   async function doPostNow(){
     if(!confirm(`Post Wk${ca.week_number} "${drillName}" to IG + FB right now?`))return;
@@ -895,8 +954,58 @@ function SocialCaptionCard({ca,onUpdate}){
     setPostResult({ok:true,msg:'Triggered — Telegram will confirm once posted (allow ~3 min for IG Reel processing)'});
     setPosting(false);
   }
-  async function saveEdit(){await onUpdate(ca.id,{full_content:{...ca.full_content,caption:editText},preview_text:editText});setEditing(false);}
   async function copyCaption(){try{await navigator.clipboard.writeText(caption);setCopied(true);setTimeout(()=>setCopied(false),2000);}catch{}}
+
+  async function doRequestCopyRevision(){
+    if(copyEditMode==='manual'){
+      // Save the manually typed caption directly
+      const fc={...ca.full_content,caption:copyText,draft_saved:true};
+      await onUpdate(ca.id,{full_content:fc,preview_text:copyText});
+      setDraftSaved(true);
+    }else{
+      // AI rewrite
+      if(!copyNote.trim()){alert('Add revision notes so Claude knows what to change.');return;}
+      setRegenerating(true);
+      const sys='You are an expert social media copywriter for Titan Ball Machines MY, a pickleball equipment brand in Malaysia. Write engaging, energetic captions for Instagram and Facebook.';
+      const usr=`Rewrite the following Instagram/Facebook caption based on the reviewer feedback.\n\nDrill topic: ${drillName}\nScheduled: ${ca.scheduled_for?new Date(ca.scheduled_for).toDateString():''}\n\nCurrent caption:\n${copyText||'(no caption yet)'}\n\nRevision notes: ${copyNote}\n\nWrite ONLY the revised caption. Preserve any YouTube link and hashtags format. No preamble or labels.`;
+      try{
+        const res=await fetch(`${N8N}/webhook/claude-proxy`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({system:sys,prompt:usr})});
+        const raw=await res.text();
+        let data;try{data=JSON.parse(raw);}catch{throw new Error('Bad response: '+raw.slice(0,100));}
+        const newText=(data?.content?.[0]?.text||data?.[0]?.content?.[0]?.text||data?.body?.content?.[0]?.text||'').trim();
+        if(newText){
+          setCopyText(newText);
+          const fc={...ca.full_content,caption:newText,draft_saved:true};
+          await onUpdate(ca.id,{full_content:fc,preview_text:newText});
+          setCopyNote('');setDraftSaved(true);
+        }else{alert('Claude returned empty response.');}
+      }catch(e){alert('Copy revision failed: '+e.message);}
+      setRegenerating(false);
+    }
+  }
+  async function doSaveAsDraft(){
+    setBusy(true);
+    const fc={...ca.full_content,caption:copyText,draft_saved:true,
+      igVideoUrl:newIgUrl||ca.full_content?.igVideoUrl||'',
+      youtubeUrl:newYtUrl||ca.full_content?.youtubeUrl||ca.full_content?.youtube_url||''};
+    await onUpdate(ca.id,{full_content:fc,preview_text:copyText});
+    setDraftSaved(true);setBusy(false);
+  }
+  async function doSaveAndApprove(){
+    setBusy(true);
+    const fc={...ca.full_content,caption:copyText,
+      igVideoUrl:newIgUrl||ca.full_content?.igVideoUrl||'',
+      youtubeUrl:newYtUrl||ca.full_content?.youtubeUrl||ca.full_content?.youtube_url||''};
+    await onUpdate(ca.id,{status:'approved',approved_at:new Date().toISOString(),full_content:fc,preview_text:copyText});
+    setBusy(false);
+  }
+  async function doConfirmReject(){
+    if(!rejectRemark.trim()&&!confirm('Reject without a reason?'))return;
+    setBusy(true);
+    const fc={...ca.full_content,rejection_reason:rejectRemark};
+    await onUpdate(ca.id,{status:'skipped',full_content:fc});
+    setRejectMode(false);setBusy(false);
+  }
 
   async function doRevise(){
     if(!note.trim()){alert('Add revision notes — Claude will rewrite the caption.');return;}
@@ -924,46 +1033,97 @@ function SocialCaptionCard({ca,onUpdate}){
         </div>
         <div style=${{color:C.mt,fontSize:11}}>📅 ${fmtDay(ca.scheduled_for)} · Instagram Reel + Facebook Post</div>
       </div>
-      <span style=${{background:`${st.c}15`,color:st.c,border:`0.5px solid ${st.c}35`,borderRadius:20,padding:'3px 10px',fontSize:11,fontWeight:600,whiteSpace:'nowrap',flexShrink:0}}>${st.icon} ${st.l}</span>
+      <div style=${{display:'flex',alignItems:'center',gap:6,flexShrink:0}}>
+        ${(isActionable&&draftSaved)&&html`<span style=${{background:'rgba(251,191,36,0.12)',color:'#fbbf24',border:'0.5px solid rgba(251,191,36,0.3)',borderRadius:10,padding:'2px 8px',fontSize:10,fontWeight:600}}>📝 Saved Revision</span>`}
+        <span style=${{background:`${st.c}15`,color:st.c,border:`0.5px solid ${st.c}35`,borderRadius:20,padding:'3px 10px',fontSize:11,fontWeight:600,whiteSpace:'nowrap'}}>${st.icon} ${st.l}</span>
+      </div>
     </div>
 
     <div style=${{padding:'14px 16px'}}>
-      ${editing
+      ${isActionable
         ?html`<div>
-          <textarea value=${editText} onInput=${e=>setEditText(e.target.value)} autoFocus
-            style=${{background:C.s2,border:`1px solid ${C.ac}`,borderRadius:8,padding:'12px 14px',fontSize:13,lineHeight:1.75,color:C.tx,width:'100%',resize:'vertical',minHeight:200,outline:'none'}}/>
-          <div style=${{display:'flex',gap:7,marginTop:7,justifyContent:'flex-end'}}>
-            <button onClick=${()=>{setEditing(false);setEditText(caption);}} style=${{background:'transparent',border:`0.5px solid ${C.bd}`,borderRadius:5,color:C.dm,padding:'5px 13px',fontSize:12,cursor:'pointer'}}>Cancel</button>
-            <button onClick=${saveEdit} style=${{background:C.ac,border:'none',borderRadius:5,color:'#fff',padding:'5px 16px',fontSize:12,fontWeight:600,cursor:'pointer'}}>Save Edit</button>
+
+          <!-- ── COPY EDIT ── -->
+          <div style=${{marginBottom:0}}>
+            <div style=${{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:10}}>
+              <span style=${{fontSize:11,fontWeight:700,color:C.dm,letterSpacing:'0.4px',textTransform:'uppercase'}}>📝 Copy Edit</span>
+              <div style=${{display:'flex',background:C.s3,borderRadius:5,padding:2,border:`0.5px solid ${C.bd}`}}>
+                <button onClick=${()=>setCopyEditMode('manual')} style=${{background:copyEditMode==='manual'?C.s1:'transparent',border:'none',borderRadius:3,color:copyEditMode==='manual'?C.tx:C.mt,padding:'3px 10px',fontSize:11,cursor:'pointer',fontWeight:copyEditMode==='manual'?600:400,transition:'all 0.15s'}}>✏ Edit Directly</button>
+                <button onClick=${()=>setCopyEditMode('ai')} style=${{background:copyEditMode==='ai'?C.s1:'transparent',border:'none',borderRadius:3,color:copyEditMode==='ai'?C.tx:C.mt,padding:'3px 10px',fontSize:11,cursor:'pointer',fontWeight:copyEditMode==='ai'?600:400,transition:'all 0.15s'}}>🤖 AI Feedback</button>
+              </div>
+            </div>
+            ${copyEditMode==='manual'
+              ?html`<textarea value=${copyText} onInput=${e=>setCopyText(e.target.value)}
+                  placeholder="Type the post caption here — what will be published to IG + FB…"
+                  style=${{background:C.s2,border:`1px solid ${C.bdB}`,borderRadius:6,padding:'10px 12px',fontSize:12,lineHeight:1.75,color:C.tx,width:'100%',resize:'vertical',minHeight:140,outline:'none'}}/>`
+              :html`<textarea value=${copyNote} onInput=${e=>setCopyNote(e.target.value)}
+                  placeholder="Describe what to change — tone, angle, what to add or remove, key message…"
+                  style=${{background:C.s2,border:`1px solid ${C.bdB}`,borderRadius:6,padding:'10px 12px',fontSize:12,lineHeight:1.6,color:C.tx,width:'100%',resize:'vertical',minHeight:80,outline:'none'}}/>`
+            }
+            <button onClick=${doRequestCopyRevision} disabled=${busy||regenerating}
+              style=${{marginTop:8,background:`${C.ac}14`,color:C.ac,border:`0.5px solid ${C.ac}45`,borderRadius:6,padding:'7px 16px',fontSize:12,fontWeight:600,cursor:(busy||regenerating)?'default':'pointer',opacity:(busy||regenerating)?0.6:1}}>
+              ${regenerating?'🤖 Rewriting…':(busy?'Saving…':(copyEditMode==='ai'?'🤖 Request Copy Revision':'💾 Request Copy Revision'))}
+            </button>
+          </div>
+
+          <!-- ── IMAGE / VIDEO / GRAPHICS EDIT ── -->
+          <div style=${{borderTop:`0.5px solid ${C.bd}`,paddingTop:14,marginTop:14}}>
+            <span style=${{fontSize:11,fontWeight:700,color:C.dm,letterSpacing:'0.4px',textTransform:'uppercase',display:'block',marginBottom:10}}>📹 Image / Video / Graphics Edit</span>
+            <div style=${{fontSize:11,color:C.mt,marginBottom:10}}>Update video URLs if you want to swap to a different clip. Leave blank to keep current values from Google Sheets.</div>
+            <div style=${{marginBottom:8}}>
+              <label style=${{display:'block',fontSize:11,color:C.dm,marginBottom:4}}>IG Reel Video URL (Bunny CDN / Drive link):</label>
+              <input value=${newIgUrl} onInput=${e=>setNewIgUrl(e.target.value)}
+                placeholder="${igV||'No IG video URL currently set'}"
+                style=${{background:C.s2,border:`1px solid ${C.bdB}`,borderRadius:6,padding:'7px 10px',fontSize:11,color:C.tx,width:'100%',outline:'none'}}/>
+            </div>
+            <div>
+              <label style=${{display:'block',fontSize:11,color:C.dm,marginBottom:4}}>YouTube URL (for caption link):</label>
+              <input value=${newYtUrl} onInput=${e=>setNewYtUrl(e.target.value)}
+                placeholder="${yt||'No YouTube URL currently set'}"
+                style=${{background:C.s2,border:`1px solid ${C.bdB}`,borderRadius:6,padding:'7px 10px',fontSize:11,color:C.tx,width:'100%',outline:'none'}}/>
+            </div>
+          </div>
+
+          <!-- ── BOTTOM ACTIONS ── -->
+          <div style=${{borderTop:`0.5px solid ${C.bd}`,paddingTop:14,marginTop:14}}>
+            ${rejectMode
+              ?html`<div>
+                <div style=${{color:C.er,fontSize:12,marginBottom:7,fontWeight:600}}>Why are you rejecting this? (saved for future reference)</div>
+                <textarea value=${rejectRemark} onInput=${e=>setRejectRemark(e.target.value)} autoFocus
+                  placeholder="e.g. Campaign plan changed, wrong concept, replaced with different approach…"
+                  style=${{background:C.s2,border:`1px solid ${C.er}50`,borderRadius:6,color:C.tx,padding:'8px 11px',fontSize:12,width:'100%',resize:'vertical',minHeight:60,outline:'none',marginBottom:10,lineHeight:1.5}}/>
+                <div style=${{display:'flex',gap:8}}>
+                  <button onClick=${doConfirmReject} disabled=${busy} style=${{background:`${C.er}14`,color:C.er,border:`0.5px solid ${C.er}50`,borderRadius:6,padding:'7px 16px',fontSize:12,fontWeight:600,cursor:busy?'default':'pointer',opacity:busy?0.6:1}}>Confirm Reject</button>
+                  <button onClick=${()=>{setRejectMode(false);setRejectRemark('');}} style=${{background:'transparent',color:C.dm,border:`0.5px solid ${C.bd}`,borderRadius:6,padding:'7px 14px',fontSize:12,cursor:'pointer'}}>Cancel</button>
+                </div>
+              </div>`
+              :html`<div style=${{display:'flex',gap:8,flexWrap:'wrap',alignItems:'center'}}>
+                <button onClick=${doSaveAsDraft} disabled=${busy} style=${{background:`${C.ac}12`,color:C.ac,border:`0.5px solid ${C.ac}45`,borderRadius:6,padding:'8px 18px',fontSize:13,fontWeight:600,cursor:busy?'default':'pointer',opacity:busy?0.6:1}}>
+                  ${busy?'Saving…':'💾 Save as Draft'}
+                </button>
+                <button onClick=${doSaveAndApprove} disabled=${busy} style=${{background:C.ok,color:'#0a1a0a',border:'none',borderRadius:6,padding:'8px 20px',fontSize:13,fontWeight:700,cursor:busy?'default':'pointer',opacity:busy?0.6:1}}>
+                  ✓ Save & Approve
+                </button>
+                <button onClick=${()=>setRejectMode(true)} style=${{background:'transparent',color:C.er,border:`0.5px solid ${C.er}45`,borderRadius:6,padding:'8px 15px',fontSize:13,cursor:'pointer'}}>
+                  ✗ Reject
+                </button>
+              </div>`
+            }
           </div>
         </div>`
         :html`<div>
-          <div style=${{background:C.s2,border:`0.5px solid ${isApproved?C.ok+'50':C.bd}`,borderRadius:8,padding:'12px 14px',fontSize:13,lineHeight:1.75,color:C.tx,whiteSpace:'pre-wrap',maxHeight:260,overflowY:'auto'}}>
-            ${caption||'No caption generated yet.'}
+          <div style=${{background:C.s2,border:`0.5px solid ${isApproved?C.ok+'50':C.bd}`,borderRadius:8,padding:'12px 14px',fontSize:13,lineHeight:1.75,color:C.tx,whiteSpace:'pre-wrap',maxHeight:220,overflowY:'auto'}}>
+            ${caption||'No caption set.'}
           </div>
           <div style=${{display:'flex',justifyContent:'flex-end',gap:7,marginTop:6}}>
             <button onClick=${copyCaption} style=${{background:'transparent',border:`0.5px solid ${C.bd}`,borderRadius:5,color:copied?C.ok:C.dm,padding:'4px 10px',fontSize:11,cursor:'pointer'}}>${copied?'✓ Copied':'Copy text'}</button>
-            <button onClick=${()=>{setEditing(true);setEditText(caption);}} style=${{background:'transparent',border:`0.5px solid ${C.bdB}`,borderRadius:5,color:C.dm,padding:'4px 10px',fontSize:11,cursor:'pointer'}}>✏ Edit caption</button>
+          </div>
+          <div style=${{marginTop:8,padding:'7px 10px',background:C.s2+'60',borderRadius:6,fontSize:11,color:C.dm,lineHeight:1.8}}>
+            ${yt?html`<div>▶️ <a href=${yt} target="_blank" style=${{color:C.ac,textDecoration:'none'}}>${yt}</a></div>`:''}
+            ${igV?html`<div>📱 IG Reel: <span style=${{color:C.tl}}>${igV.split('/').pop()}</span></div>`:''}
           </div>
         </div>`
       }
-
-      <div style=${{marginTop:10,padding:'8px 12px',background:C.s2+'60',borderRadius:8,fontSize:11,color:C.dm,lineHeight:1.8}}>
-        ${yt?html`<div>▶️ <a href=${yt} target="_blank" style=${{color:C.ac,textDecoration:'none'}}>${yt}</a></div>`:''}
-        ${igV?html`<div>📱 IG Reel: <span style=${{color:C.tl}}>${igV.split('/').pop()}</span></div>`:''}
-      </div>
-
-      ${isActionable?html`<div style=${{marginTop:14,paddingTop:14,borderTop:`0.5px solid ${C.bd}`}}>
-        <textarea placeholder="Revision notes for AI rewrite (optional — leave blank to just approve)…" value=${note} onInput=${e=>setNote(e.target.value)}
-          style=${{background:C.s2,border:`0.5px solid ${C.bd}`,borderRadius:6,color:C.tx,padding:'8px 11px',fontSize:12,width:'100%',resize:'vertical',minHeight:52,outline:'none',marginBottom:10,lineHeight:1.5}}/>
-        <div style=${{display:'flex',gap:8,flexWrap:'wrap'}}>
-          <button onClick=${doApprove} disabled=${busy} style=${{background:C.ok,color:'#0a1a0a',border:'none',borderRadius:6,padding:'8px 20px',fontSize:13,fontWeight:700,cursor:busy?'default':'pointer',opacity:busy?0.6:1}}>✓ Approve</button>
-          <button onClick=${doRevise} disabled=${busy||regenerating} style=${{background:regenerating?`${C.pu}20`:'transparent',color:C.pu,border:`0.5px solid ${C.pu}`,borderRadius:6,padding:'8px 15px',fontSize:13,cursor:(busy||regenerating)?'default':'pointer',opacity:(busy||regenerating)?0.8:1}}>
-            ${regenerating?'🤖 Rewriting…':'✏ Revise with AI'}
-          </button>
-          <button onClick=${doSkip} disabled=${busy} style=${{background:'transparent',color:C.er,border:`0.5px solid ${C.er}`,borderRadius:6,padding:'8px 15px',fontSize:13,cursor:busy?'default':'pointer',opacity:busy?0.6:1}}>✗ Skip</button>
-        </div>
-      </div>`:''}
       ${isApproved?html`<div style=${{marginTop:14,paddingTop:14,borderTop:`0.5px solid ${C.bd}`}}>
         <div style=${{display:'flex',alignItems:'center',gap:10,flexWrap:'wrap',marginBottom:8}}>
           <span style=${{color:C.ok,fontSize:12}}>✓ Approved — fires Wednesday ${fmtDay(ca.scheduled_for)}</span>
