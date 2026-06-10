@@ -754,6 +754,8 @@ function SocialCaptionCard({ca,onUpdate}){
   const[busy,setBusy]=useState(false);
   const[regenerating,setRegenerating]=useState(false);
   const[copied,setCopied]=useState(false);
+  const[posting,setPosting]=useState(false);
+  const[postResult,setPostResult]=useState(null);
 
   const drillName=(ca.subject||'').replace(/^TDOW Social Wk\d+:\s*/i,'');
   const yt=ca.full_content?.youtubeUrl||ca.full_content?.youtube_url||'';
@@ -767,6 +769,13 @@ function SocialCaptionCard({ca,onUpdate}){
   async function doApprove(){setBusy(true);await onUpdate(ca.id,{status:'approved',approved_at:new Date().toISOString()});setBusy(false);}
   async function doSkip(){if(!confirm('Skip this week\'s social post? It won\'t be posted on Wednesday.'))return;setBusy(true);await onUpdate(ca.id,{status:'skipped'});setBusy(false);}
   async function doReopen(){setBusy(true);await onUpdate(ca.id,{status:'pending',approved_at:null});setBusy(false);}
+  async function doPostNow(){
+    if(!confirm(`Post Wk${ca.week_number} "${drillName}" to IG + FB right now?`))return;
+    setPosting(true);setPostResult(null);
+    fetch(`${N8N}/webhook/social-sync-run`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({weekOverride:ca.week_number,source:'app4_manual'})}).catch(()=>{});
+    setPostResult({ok:true,msg:'Triggered — Telegram will confirm once posted (allow ~3 min for IG Reel processing)'});
+    setPosting(false);
+  }
   async function saveEdit(){await onUpdate(ca.id,{full_content:{...ca.full_content,caption:editText}});setEditing(false);}
   async function copyCaption(){try{await navigator.clipboard.writeText(caption);setCopied(true);setTimeout(()=>setCopied(false),2000);}catch{}}
 
@@ -836,9 +845,15 @@ function SocialCaptionCard({ca,onUpdate}){
           <button onClick=${doSkip} disabled=${busy} style=${{background:'transparent',color:C.er,border:`0.5px solid ${C.er}`,borderRadius:6,padding:'8px 15px',fontSize:13,cursor:busy?'default':'pointer',opacity:busy?0.6:1}}>✗ Skip</button>
         </div>
       </div>`:''}
-      ${isApproved?html`<div style=${{marginTop:14,paddingTop:14,borderTop:`0.5px solid ${C.bd}`,display:'flex',alignItems:'center',gap:12,flexWrap:'wrap'}}>
-        <span style=${{color:C.ok,fontSize:12}}>✓ Approved — fires Wednesday ${fmtDay(ca.scheduled_for)}</span>
-        <button onClick=${doReopen} disabled=${busy} style=${{background:'transparent',color:C.dm,border:`0.5px solid ${C.bd}`,borderRadius:6,padding:'5px 12px',fontSize:11,cursor:'pointer',opacity:busy?0.6:1}}>Re-open for Revision</button>
+      ${isApproved?html`<div style=${{marginTop:14,paddingTop:14,borderTop:`0.5px solid ${C.bd}`}}>
+        <div style=${{display:'flex',alignItems:'center',gap:10,flexWrap:'wrap',marginBottom:postResult?8:0}}>
+          <span style=${{color:C.ok,fontSize:12}}>✓ Approved — fires Wednesday ${fmtDay(ca.scheduled_for)}</span>
+          <button onClick=${doPostNow} disabled=${busy||posting} style=${{background:posting?'transparent':`${C.ok}18`,color:C.ok,border:`0.5px solid ${C.ok}50`,borderRadius:6,padding:'5px 14px',fontSize:12,fontWeight:700,cursor:(busy||posting)?'default':'pointer',opacity:(busy||posting)?0.6:1}}>
+            ${posting?'⏳ Firing…':'🚀 Post Now'}
+          </button>
+          <button onClick=${doReopen} disabled=${busy} style=${{background:'transparent',color:C.dm,border:`0.5px solid ${C.bd}`,borderRadius:6,padding:'5px 12px',fontSize:11,cursor:'pointer',opacity:busy?0.6:1}}>Re-open for Revision</button>
+        </div>
+        ${postResult?html`<div style=${{padding:'6px 10px',borderRadius:6,background:postResult.ok?`${C.ok}12`:`${C.er}12`,color:postResult.ok?C.ok:C.er,fontSize:11}}>${postResult.ok?'✓ ':'✗ '}${postResult.msg}</div>`:''}
       </div>`:''}
       ${ca.status==='skipped'?html`<div style=${{marginTop:14,paddingTop:14,borderTop:`0.5px solid ${C.bd}`,display:'flex',alignItems:'center',gap:12}}>
         <span style=${{color:C.er,fontSize:12}}>✗ Skipped — will not post this Wednesday</span>
@@ -853,7 +868,22 @@ function DeploymentTab({deployments,clients}){
   const[l1,setL1]=useState('all');
   const[l2,setL2]=useState('all');
   const[filterClient,setFilterClient]=useState('all');
+  const[firingRows,setFiringRows]=useState({});
+  const[fireResults,setFireResults]=useState({});
   const{approvals,assets}=deployments;
+
+  const FIRE_WEBHOOK={email:'email-blast-run',social:'social-sync-run',real_gains:'real-gains-run'};
+  async function fireRow(row){
+    if(firingRows[row.id])return;
+    const wh=FIRE_WEBHOOK[row.content_type];
+    if(!wh){alert('No webhook configured for this content type.');return;}
+    if(!confirm(`Fire ${row.meta?.label||row.content_type} Wk${row.week_number} now?\n\nThis will immediately publish to the live channel. Check Telegram for confirmation.`))return;
+    setFiringRows(p=>({...p,[row.id]:true}));
+    setFireResults(p=>({...p,[row.id]:null}));
+    fetch(`${N8N}/webhook/${wh}`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({weekOverride:row.week_number,source:'app4_deployments'})}).catch(()=>{});
+    setFireResults(p=>({...p,[row.id]:{ok:true}}));
+    setFiringRows(p=>({...p,[row.id]:false}));
+  }
   const now=new Date();
   const fmtShort=d=>d?new Date(d).toLocaleDateString('en-MY',{day:'numeric',month:'short',...MYT}):'—';
 
@@ -892,16 +922,36 @@ function DeploymentTab({deployments,clients}){
   const caIds=new Set(approvals.map(ca=>ca.full_content?.asset_id).filter(Boolean));
   const standaloneAssets=assets.filter(a=>!caIds.has(a.id)&&a.status==='published');
 
+  function FireBtn({row}){
+    const isFiring=!!firingRows[row.id];
+    const result=fireResults[row.id];
+    if(result?.ok)return html`<span style=${{color:'#34d399',fontSize:10}}>✓ Triggered</span>`;
+    return html`<button onClick=${()=>fireRow(row)} disabled=${isFiring}
+      style=${{marginTop:3,background:'rgba(74,134,245,0.12)',color:'#4a86f5',border:'0.5px solid rgba(74,134,245,0.4)',borderRadius:5,padding:'3px 8px',fontSize:10,fontWeight:700,cursor:isFiring?'default':'pointer',opacity:isFiring?0.6:1,display:'block'}}>
+      ${isFiring?'⏳…':'🚀 Fire Now'}
+    </button>`;
+  }
+
   function StatusCell({row}){
+    const canFire=FIRE_WEBHOOK[row.content_type]&&row.status!=='published'&&row.status!=='skipped';
     if(row.deployment_error)return html`<div>
       <span style=${{color:'#f87171',fontWeight:700,fontSize:11}}>❌ Failed</span>
       <div style=${{color:'#f87171',fontSize:10,marginTop:2,maxWidth:180,wordBreak:'break-word'}}>${row.deployment_error}</div>
+      ${canFire&&html`<${FireBtn} row=${row}/>`}
     </div>`;
     if(row.status==='published')return html`<span style=${{color:'#34d399',fontWeight:700,fontSize:11}}>✓ Published</span>`;
     if(row.status==='skipped')return html`<span style=${{color:'#5a8ab0',fontSize:11}}>⏭ Skipped</span>`;
-    if(row.isPast)return html`<span style=${{color:'#f87171',fontSize:11}}>⚠ Overdue</span>`;
-    if(row.daysUntil!==null&&row.daysUntil<=1)return html`<span style=${{color:'#fbbf24',fontWeight:700,fontSize:11}}>⚡ Tomorrow</span>`;
-    if(row.daysUntil!==null&&row.daysUntil<=3)return html`<span style=${{color:'#fbbf24',fontSize:11}}>⚡ In ${row.daysUntil}d</span>`;
+    if(row.isPast)return html`<div>
+      <span style=${{color:'#f87171',fontSize:11}}>⚠ Overdue</span>
+      ${canFire&&html`<${FireBtn} row=${row}/>`}
+    </div>`;
+    if(row.daysUntil!==null&&row.daysUntil<=1)return html`<div>
+      <span style=${{color:'#fbbf24',fontWeight:700,fontSize:11}}>⚡ Tomorrow</span>
+      ${canFire&&html`<${FireBtn} row=${row}/>`}
+    </div>`;
+    if(row.daysUntil!==null&&row.daysUntil<=3)return html`<div>
+      <span style=${{color:'#fbbf24',fontSize:11}}>⚡ In ${row.daysUntil}d</span>
+    </div>`;
     return html`<span style=${{color:'#4a86f5',fontSize:11}}>📅 Scheduled</span>`;
   }
 
