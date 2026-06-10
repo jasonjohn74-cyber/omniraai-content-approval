@@ -79,7 +79,7 @@ const db={
   // Sync asset approval status back to content_approvals (for real_gains series)
   async syncContentApproval(assetId, status){
     try{
-      const statusMap={approved:'approved',rejected:'skipped',revision_requested:'revision_requested'};
+      const statusMap={approved:'approved',rejected:'skipped',revision_requested:'revision_requested',pending_review:'pending'};
       const caStatus=statusMap[status];
       if(!caStatus)return;
       const r=await fetch(`${SB_URL}/rest/v1/content_approvals?content_type=eq.real_gains&select=id,full_content`,{headers:SBH});
@@ -559,11 +559,28 @@ function MediaAssetCard({asset,onUpdate,onArchive,onDelete,weekInfo}){
         </div>`}
       </div>`}
 
-      ${asset.status==='rejected'&&onDelete&&html`<div style=${{borderTop:`0.5px solid ${C.bd}`,paddingTop:10,display:'flex',gap:8,alignItems:'center'}}>
-        <button onClick=${()=>onDelete(asset)} style=${{background:'rgba(248,113,113,0.1)',color:C.er,border:`0.5px solid ${C.er}55`,borderRadius:6,padding:'7px 14px',fontSize:12,fontWeight:600,cursor:'pointer'}}>
-          🗑️ Delete
-        </button>
-        <span style=${{color:'#274466',fontSize:10}}>Permanently removes this rejected asset.</span>
+      ${asset.status==='rejected'&&html`<div style=${{borderTop:`0.5px solid ${C.bd}`,paddingTop:12}}>
+        ${asset.feedback&&html`<div style=${{background:`${C.er}08`,border:`0.5px solid ${C.er}25`,borderRadius:6,padding:'8px 12px',marginBottom:10,fontSize:11,color:'#f87171',lineHeight:1.5}}>
+          <span style=${{fontWeight:700}}>Rejection feedback: </span>${asset.feedback}
+        </div>`}
+        <div style=${{display:'flex',gap:8,flexWrap:'wrap',alignItems:'center'}}>
+          <button onClick=${async()=>{
+            await onUpdate({...asset,status:'revision_requested',approved_at:null});
+            await db.syncContentApproval(asset.id,'revision_requested');
+          }} style=${{background:`${C.pu}15`,color:C.pu,border:`0.5px solid ${C.pu}55`,borderRadius:6,padding:'7px 14px',fontSize:12,fontWeight:600,cursor:'pointer'}} title="Returns to revision queue with feedback intact — ready for AI regen">
+            ↩ Restore for Revision
+          </button>
+          <button onClick=${async()=>{
+            await onUpdate({...asset,status:'pending_review',feedback:null,approved_at:null});
+            await db.syncContentApproval(asset.id,'pending_review');
+          }} style=${{background:'rgba(74,134,245,0.1)',color:C.ac,border:`0.5px solid rgba(74,134,245,0.4)`,borderRadius:6,padding:'7px 14px',fontSize:12,cursor:'pointer'}} title="Clears feedback and returns to pending review">
+            ↺ Back to Pending
+          </button>
+          ${onDelete&&html`<button onClick=${()=>onDelete(asset)} style=${{background:'rgba(248,113,113,0.08)',color:C.er,border:`0.5px solid ${C.er}40`,borderRadius:6,padding:'7px 10px',fontSize:12,cursor:'pointer'}} title="Permanently delete this asset">
+            🗑️ Delete
+          </button>`}
+        </div>
+        <div style=${{color:'#274466',fontSize:10,marginTop:6}}>"Restore for Revision" keeps feedback for AI regen. "Back to Pending" clears it and resets to fresh review.</div>
       </div>`}
 
     </div>
