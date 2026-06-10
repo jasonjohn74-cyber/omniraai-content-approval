@@ -242,7 +242,7 @@ function MediaAssetCard({asset,onUpdate,onArchive,onDelete,weekInfo}){
   const[restoring,setRestoring]=useState(false);
   const[posting,setPosting]=useState(false);
   const[postResult,setPostResult]=useState(null);
-  const[captionText,setCaptionText]=useState(weekInfo?.post_caption||'');
+  const[captionText,setCaptionText]=useState(weekInfo?.post_caption||asset.data?.copy_body||'');
   const[captionNote,setCaptionNote]=useState('');
   const[captionBusy,setCaptionBusy]=useState(false);
   const[copyEditMode,setCopyEditMode]=useState('manual');
@@ -253,8 +253,8 @@ function MediaAssetCard({asset,onUpdate,onArchive,onDelete,weekInfo}){
   const fileRef=useRef(null);
   const refInputRef=useRef(null);
   const[captionKey,setCaptionKey]=useState(0);
-  // Force textarea remount (via key) whenever post_caption changes externally (data refresh)
-  useEffect(()=>{setCaptionText(weekInfo?.post_caption||'');setCaptionKey(k=>k+1);},[weekInfo?.post_caption]);
+  // Force textarea remount (via key) whenever the source copy changes externally (data refresh)
+  useEffect(()=>{setCaptionText(weekInfo?.post_caption||asset.data?.copy_body||'');setCaptionKey(k=>k+1);},[weekInfo?.post_caption,asset.data?.copy_body]);
 
   const ch=CHANNEL_META[asset.channel]||{icon:'🖼',label:asset.channel,dims:'',type:'image'};
   const isVideo=asset.asset_type==='video'||asset.asset_url?.match(/\.(mp4|mov|webm)/i);
@@ -367,28 +367,39 @@ function MediaAssetCard({asset,onUpdate,onArchive,onDelete,weekInfo}){
   }
 
   function flashCopyMsg(msg){setCopySaveMsg(msg);setTimeout(()=>setCopySaveMsg(''),3000);}
-  async function saveCaptionEdit(){
-    if(!weekInfo?.ca_id)return;
-    setCaptionBusy(true);
-    try{
+  // SINGLE SOURCE OF TRUTH: persist caption to BOTH content_approvals.post_caption
+  // (n8n publisher reads this) AND campaign_assets.data.copy_body (display + deployments
+  // read this) so the displayed copy and the editor never diverge. Also refreshes local
+  // React state via onUpdate so the UI reflects the saved copy immediately.
+  async function persistCaption(text,extra={}){
+    // 1) content_approvals.full_content.post_caption — what the publisher sends to IG/FB
+    if(weekInfo?.ca_id){
       const r=await fetch(`${SB_URL}/rest/v1/content_approvals?id=eq.${weekInfo.ca_id}&select=full_content`,{headers:SBH});
       const recs=await r.json();
-      const fc={...(recs?.[0]?.full_content||{}),post_caption:captionText};
+      const fc={...(recs?.[0]?.full_content||{}),post_caption:text,...(extra.caFields||{})};
       await fetch(`${SB_URL}/rest/v1/content_approvals?id=eq.${weekInfo.ca_id}`,{
         method:'PATCH',headers:{...SBH,'Prefer':'return=minimal'},
         body:JSON.stringify({full_content:fc,updated_at:new Date().toISOString()})
       });
-      flashCopyMsg('✓ Caption saved');
+    }
+    // 2) campaign_assets.data.copy_body — the copy shown on the card + Deployments tab
+    const newData={...(asset.data||{}),copy_body:text,...(extra.assetData||{})};
+    await onUpdate({...asset,data:newData,...(extra.assetFields||{})});
+  }
+  async function saveCaptionEdit(){
+    setCaptionBusy(true);
+    try{
+      await persistCaption(captionText);
+      flashCopyMsg('✓ Copy saved — it now matches the preview above');
     }catch(e){alert('Save failed: '+e.message);}
     setCaptionBusy(false);
   }
   async function doRewriteCaption(){
     if(!captionNote.trim()){alert('Add notes so AI knows how to rewrite the caption.');return;}
-    if(!weekInfo?.ca_id)return;
     setCaptionBusy(true);
-    const topic=asset.asset_name||'pickleball drill';
+    const topic=asset.data?.topic||asset.asset_name||'pickleball drill';
     const sys='You are an expert social media copywriter for Titan Ball Machines MY, a pickleball equipment brand in Malaysia. Write engaging, energetic captions for Instagram and Facebook.';
-    const usr=`Write a new Instagram/Facebook caption for a "Real Gains with Titan" post.\n\nTopic: ${topic}\nWeek: ${weekInfo.week_number}\nCurrent caption: ${captionText||'(not set — auto-generated from topic)'}\n\nRevision notes: ${captionNote}\n\nWrite ONLY the caption. Include relevant pickleball hashtags at the end. No preamble or labels.`;
+    const usr=`Rewrite the following Instagram/Facebook caption for a "Real Gains with Titan" post based on the reviewer feedback.\n\nTopic: ${topic}\nWeek: ${weekInfo?.week_number||''}\n\nCurrent caption:\n${captionText||'(not set — auto-generated from topic)'}\n\nRevision notes: ${captionNote}\n\nWrite ONLY the revised caption. Preserve hashtags and partner venue handles if present. No preamble or labels.`;
     try{
       const res=await fetch(`${N8N}/webhook/claude-proxy`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({system:sys,prompt:usr})});
       const raw=await res.text();
@@ -398,15 +409,9 @@ function MediaAssetCard({asset,onUpdate,onArchive,onDelete,weekInfo}){
         setCaptionText(newText);
         setCaptionKey(k=>k+1);
         setCopyEditMode('manual');
-        const r2=await fetch(`${SB_URL}/rest/v1/content_approvals?id=eq.${weekInfo.ca_id}&select=full_content`,{headers:SBH});
-        const recs=await r2.json();
-        const fc={...(recs?.[0]?.full_content||{}),post_caption:newText};
-        await fetch(`${SB_URL}/rest/v1/content_approvals?id=eq.${weekInfo.ca_id}`,{
-          method:'PATCH',headers:{...SBH,'Prefer':'return=minimal'},
-          body:JSON.stringify({full_content:fc,updated_at:new Date().toISOString()})
-        });
+        await persistCaption(newText);
         setCaptionNote('');
-        flashCopyMsg('✓ AI caption saved — review in Edit Directly tab');
+        flashCopyMsg('✓ AI rewrite saved — now showing in Edit Directly');
       }else{alert('Claude returned empty response.');}
     }catch(e){alert('Caption rewrite failed: '+e.message);}
     setCaptionBusy(false);
@@ -417,30 +422,19 @@ function MediaAssetCard({asset,onUpdate,onArchive,onDelete,weekInfo}){
   }
   async function doSaveAsDraft(){
     setCaptionBusy(true);
-    if(weekInfo?.ca_id){
-      try{
-        const r=await fetch(`${SB_URL}/rest/v1/content_approvals?id=eq.${weekInfo.ca_id}&select=full_content`,{headers:SBH});
-        const recs=await r.json();
-        const fc={...(recs?.[0]?.full_content||{}),post_caption:captionText,draft_saved:true};
-        await fetch(`${SB_URL}/rest/v1/content_approvals?id=eq.${weekInfo.ca_id}`,{method:'PATCH',headers:{...SBH,'Prefer':'return=minimal'},body:JSON.stringify({full_content:fc,updated_at:new Date().toISOString()})});
-      }catch(e){console.error('Draft CA save failed:',e);}
-    }
-    await onUpdate({...asset,data:{...(asset.data||{}),draft_saved:true}});
-    setDraftSaved(true);
+    try{
+      await persistCaption(captionText,{caFields:{draft_saved:true},assetData:{draft_saved:true}});
+      setDraftSaved(true);
+      flashCopyMsg('✓ Draft saved');
+    }catch(e){alert('Draft save failed: '+e.message);}
     setCaptionBusy(false);
   }
   async function doSaveAndApprove(){
     setCaptionBusy(true);
-    if(weekInfo?.ca_id&&captionText){
-      try{
-        const r=await fetch(`${SB_URL}/rest/v1/content_approvals?id=eq.${weekInfo.ca_id}&select=full_content`,{headers:SBH});
-        const recs=await r.json();
-        const fc={...(recs?.[0]?.full_content||{}),post_caption:captionText};
-        await fetch(`${SB_URL}/rest/v1/content_approvals?id=eq.${weekInfo.ca_id}`,{method:'PATCH',headers:{...SBH,'Prefer':'return=minimal'},body:JSON.stringify({full_content:fc,updated_at:new Date().toISOString()})});
-      }catch(e){console.error('Caption save on approve failed:',e);}
-    }
+    try{
+      await persistCaption(captionText,{assetFields:{status:'approved',approved_at:now(),feedback:feedback||null}});
+    }catch(e){alert('Approve failed: '+e.message);}
     setCaptionBusy(false);
-    await onUpdate({...asset,status:'approved',approved_at:now(),feedback:feedback||null});
   }
   async function doConfirmReject(){
     if(!rejectRemark.trim()&&!confirm('Reject without a reason?'))return;
@@ -524,7 +518,10 @@ function MediaAssetCard({asset,onUpdate,onArchive,onDelete,weekInfo}){
           ${asset.data.scheduled_for?html`<span style=${{color:C.dm,fontSize:10}}>📅 ${asset.data.scheduled_for}</span>`:''}
         </div>
         ${asset.data.stat?html`<div style=${{color:C.wn,fontSize:11,fontStyle:'italic',marginBottom:6}}>📊 ${asset.data.stat}</div>`:''}
-        ${asset.data.copy_body?html`<div style=${{color:C.tx,fontSize:12,lineHeight:1.6,whiteSpace:'pre-wrap'}}>${asset.data.copy_body}</div>`:''}
+        ${captionText
+          ?html`<div style=${{color:C.tx,fontSize:12,lineHeight:1.6,whiteSpace:'pre-wrap'}}>${captionText}</div>`
+          :html`<div style=${{color:C.mt,fontSize:11,fontStyle:'italic'}}>No copy yet — add it in the Copy Edit box below.</div>`}
+        ${isActionable&&html`<div style=${{color:C.mt,fontSize:10,marginTop:7,opacity:0.85}}>↑ Live preview · reflects your Copy Edit below — this is what gets published</div>`}
       </div>`:''}
 
       <!-- Prompt editor -->
