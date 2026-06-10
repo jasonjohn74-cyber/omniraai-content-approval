@@ -246,6 +246,7 @@ function MediaAssetCard({asset,onUpdate,onArchive,onDelete,weekInfo}){
   const[captionNote,setCaptionNote]=useState('');
   const[captionBusy,setCaptionBusy]=useState(false);
   const[copyEditMode,setCopyEditMode]=useState('manual');
+  const[copySaveMsg,setCopySaveMsg]=useState('');
   const[rejectMode,setRejectMode]=useState(false);
   const[rejectRemark,setRejectRemark]=useState('');
   const[draftSaved,setDraftSaved]=useState(!!(asset.data?.draft_saved));
@@ -362,6 +363,7 @@ function MediaAssetCard({asset,onUpdate,onArchive,onDelete,weekInfo}){
     setPosting(false);
   }
 
+  function flashCopyMsg(msg){setCopySaveMsg(msg);setTimeout(()=>setCopySaveMsg(''),3000);}
   async function saveCaptionEdit(){
     if(!weekInfo?.ca_id)return;
     setCaptionBusy(true);
@@ -373,6 +375,7 @@ function MediaAssetCard({asset,onUpdate,onArchive,onDelete,weekInfo}){
         method:'PATCH',headers:{...SBH,'Prefer':'return=minimal'},
         body:JSON.stringify({full_content:fc,updated_at:new Date().toISOString()})
       });
+      flashCopyMsg('✓ Caption saved');
     }catch(e){alert('Save failed: '+e.message);}
     setCaptionBusy(false);
   }
@@ -390,6 +393,7 @@ function MediaAssetCard({asset,onUpdate,onArchive,onDelete,weekInfo}){
       const newText=(data?.content?.[0]?.text||data?.[0]?.content?.[0]?.text||data?.body?.content?.[0]?.text||'').trim();
       if(newText){
         setCaptionText(newText);
+        setCopyEditMode('manual');
         const r2=await fetch(`${SB_URL}/rest/v1/content_approvals?id=eq.${weekInfo.ca_id}&select=full_content`,{headers:SBH});
         const recs=await r2.json();
         const fc={...(recs?.[0]?.full_content||{}),post_caption:newText};
@@ -398,6 +402,7 @@ function MediaAssetCard({asset,onUpdate,onArchive,onDelete,weekInfo}){
           body:JSON.stringify({full_content:fc,updated_at:new Date().toISOString()})
         });
         setCaptionNote('');
+        flashCopyMsg('✓ AI caption saved — review in Edit Directly tab');
       }else{alert('Claude returned empty response.');}
     }catch(e){alert('Caption rewrite failed: '+e.message);}
     setCaptionBusy(false);
@@ -599,10 +604,13 @@ function MediaAssetCard({asset,onUpdate,onArchive,onDelete,weekInfo}){
                 placeholder="Describe what to change — tone, angle, what to add or remove, key message…"
                 style=${{background:C.s2,border:`1px solid ${C.bdB}`,borderRadius:6,padding:'10px 12px',fontSize:12,lineHeight:1.6,color:C.tx,width:'100%',resize:'vertical',minHeight:72,outline:'none'}}/>`
           }
-          <button onClick=${doRequestCopyRevision} disabled=${captionBusy}
-            style=${{marginTop:8,background:`${C.ac}14`,color:C.ac,border:`0.5px solid ${C.ac}45`,borderRadius:6,padding:'7px 16px',fontSize:12,fontWeight:600,cursor:captionBusy?'default':'pointer',opacity:captionBusy?0.6:1}}>
-            ${captionBusy?(copyEditMode==='ai'?'🤖 Rewriting…':'Saving…'):(copyEditMode==='ai'?'🤖 Request Copy Revision':'💾 Request Copy Revision')}
-          </button>
+          <div style=${{display:'flex',alignItems:'center',gap:10,marginTop:8,flexWrap:'wrap'}}>
+            <button onClick=${doRequestCopyRevision} disabled=${captionBusy}
+              style=${{background:`${C.ac}14`,color:C.ac,border:`0.5px solid ${C.ac}45`,borderRadius:6,padding:'7px 16px',fontSize:12,fontWeight:600,cursor:captionBusy?'default':'pointer',opacity:captionBusy?0.6:1}}>
+              ${captionBusy?(copyEditMode==='ai'?'🤖 Rewriting…':'Saving…'):(copyEditMode==='ai'?'🤖 Request Copy Revision':'💾 Request Copy Revision')}
+            </button>
+            ${copySaveMsg&&html`<span style=${{color:C.ok,fontSize:12,fontWeight:600}}>${copySaveMsg}</span>`}
+          </div>
         </div>
 
         <!-- ── IMAGE / VIDEO / GRAPHICS EDIT ── -->
@@ -931,6 +939,7 @@ function SocialCaptionCard({ca,onUpdate}){
   const[postResult,setPostResult]=useState(null);
   const[newIgUrl,setNewIgUrl]=useState(ca.full_content?.igVideoUrl||'');
   const[newYtUrl,setNewYtUrl]=useState(ca.full_content?.youtubeUrl||ca.full_content?.youtube_url||'');
+  const[copySaveMsg2,setCopySaveMsg2]=useState('');
   const[rejectMode,setRejectMode]=useState(false);
   const[rejectRemark,setRejectRemark]=useState('');
   const[draftSaved,setDraftSaved]=useState(!!(ca.full_content?.draft_saved));
@@ -954,14 +963,16 @@ function SocialCaptionCard({ca,onUpdate}){
   }
   async function copyCaption(){try{await navigator.clipboard.writeText(caption);setCopied(true);setTimeout(()=>setCopied(false),2000);}catch{}}
 
+  function flashMsg(msg){setCopySaveMsg2(msg);setTimeout(()=>setCopySaveMsg2(''),3000);}
   async function doRequestCopyRevision(){
     if(copyEditMode==='manual'){
-      // Save the manually typed caption directly
+      setBusy(true);
       const fc={...ca.full_content,caption:copyText,draft_saved:true};
       await onUpdate(ca.id,{full_content:fc,preview_text:copyText});
       setDraftSaved(true);
+      flashMsg('✓ Caption saved');
+      setBusy(false);
     }else{
-      // AI rewrite
       if(!copyNote.trim()){alert('Add revision notes so Claude knows what to change.');return;}
       setRegenerating(true);
       const sys='You are an expert social media copywriter for Titan Ball Machines MY, a pickleball equipment brand in Malaysia. Write engaging, energetic captions for Instagram and Facebook.';
@@ -973,9 +984,11 @@ function SocialCaptionCard({ca,onUpdate}){
         const newText=(data?.content?.[0]?.text||data?.[0]?.content?.[0]?.text||data?.body?.content?.[0]?.text||'').trim();
         if(newText){
           setCopyText(newText);
+          setCopyEditMode('manual');
           const fc={...ca.full_content,caption:newText,draft_saved:true};
           await onUpdate(ca.id,{full_content:fc,preview_text:newText});
           setCopyNote('');setDraftSaved(true);
+          flashMsg('✓ AI caption saved — review above');
         }else{alert('Claude returned empty response.');}
       }catch(e){alert('Copy revision failed: '+e.message);}
       setRegenerating(false);
@@ -1062,6 +1075,7 @@ function SocialCaptionCard({ca,onUpdate}){
               style=${{marginTop:8,background:`${C.ac}14`,color:C.ac,border:`0.5px solid ${C.ac}45`,borderRadius:6,padding:'7px 16px',fontSize:12,fontWeight:600,cursor:(busy||regenerating)?'default':'pointer',opacity:(busy||regenerating)?0.6:1}}>
               ${regenerating?'🤖 Rewriting…':(busy?'Saving…':(copyEditMode==='ai'?'🤖 Request Copy Revision':'💾 Request Copy Revision'))}
             </button>
+            ${copySaveMsg2&&html`<span style=${{display:'block',marginTop:7,color:C.ok,fontSize:12,fontWeight:600}}>${copySaveMsg2}</span>`}
           </div>
 
           <!-- ── IMAGE / VIDEO / GRAPHICS EDIT ── -->
