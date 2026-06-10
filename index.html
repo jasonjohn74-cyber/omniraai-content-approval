@@ -252,6 +252,8 @@ function MediaAssetCard({asset,onUpdate,onArchive,onDelete,weekInfo}){
   const[draftSaved,setDraftSaved]=useState(!!(asset.data?.draft_saved));
   const fileRef=useRef(null);
   const refInputRef=useRef(null);
+  // Sync textarea when parent loads/refreshes post_caption from Supabase
+  useEffect(()=>{setCaptionText(weekInfo?.post_caption||'');},[weekInfo?.post_caption]);
 
   const ch=CHANNEL_META[asset.channel]||{icon:'🖼',label:asset.channel,dims:'',type:'image'};
   const isVideo=asset.asset_type==='video'||asset.asset_url?.match(/\.(mp4|mov|webm)/i);
@@ -597,10 +599,10 @@ function MediaAssetCard({asset,onUpdate,onArchive,onDelete,weekInfo}){
             </div>
           </div>
           ${copyEditMode==='manual'
-            ?html`<textarea value=${captionText} onInput=${e=>setCaptionText(e.target.value)}
+            ?html`<textarea value=${captionText} onChange=${e=>setCaptionText(e.target.value)}
                 placeholder="Type the post caption here — what will be published to IG + FB…"
                 style=${{background:C.s2,border:`1px solid ${C.bdB}`,borderRadius:6,padding:'10px 12px',fontSize:12,lineHeight:1.7,color:C.tx,width:'100%',resize:'vertical',minHeight:100,outline:'none'}}/>`
-            :html`<textarea value=${captionNote} onInput=${e=>setCaptionNote(e.target.value)}
+            :html`<textarea value=${captionNote} onChange=${e=>setCaptionNote(e.target.value)}
                 placeholder="Describe what to change — tone, angle, what to add or remove, key message…"
                 style=${{background:C.s2,border:`1px solid ${C.bdB}`,borderRadius:6,padding:'10px 12px',fontSize:12,lineHeight:1.6,color:C.tx,width:'100%',resize:'vertical',minHeight:72,outline:'none'}}/>`
           }
@@ -933,6 +935,8 @@ function SocialCaptionCard({ca,onUpdate}){
   const[copyEditMode,setCopyEditMode]=useState('manual');
   const[note,setNote]=useState('');
   const[busy,setBusy]=useState(false);
+  // Sync textarea when parent refreshes CA data from Supabase
+  useEffect(()=>{setCopyText(ca.full_content?.caption||ca.preview_text||'');},[ca.full_content?.caption,ca.preview_text]);
   const[regenerating,setRegenerating]=useState(false);
   const[copied,setCopied]=useState(false);
   const[posting,setPosting]=useState(false);
@@ -1064,7 +1068,7 @@ function SocialCaptionCard({ca,onUpdate}){
               </div>
             </div>
             ${copyEditMode==='manual'
-              ?html`<textarea value=${copyText} onInput=${e=>setCopyText(e.target.value)}
+              ?html`<textarea value=${copyText} onChange=${e=>setCopyText(e.target.value)}
                   placeholder="Type the post caption here — what will be published to IG + FB…"
                   style=${{background:C.s2,border:`1px solid ${C.bdB}`,borderRadius:6,padding:'10px 12px',fontSize:12,lineHeight:1.75,color:C.tx,width:'100%',resize:'vertical',minHeight:140,outline:'none'}}/>`
               :html`<textarea value=${copyNote} onInput=${e=>setCopyNote(e.target.value)}
