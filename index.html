@@ -1196,6 +1196,8 @@ function EmailCard({ca,onUpdate}){
   const[testEmail,setTestEmail]=useState(()=>{try{return localStorage.getItem('omnira_test_email')||''}catch(e){return ''}});
   const[testSending,setTestSending]=useState(false);
   const[testResult,setTestResult]=useState(null);
+  const[previewing,setPreviewing]=useState(false);
+  const[previewDoc,setPreviewDoc]=useState(null);
   // Resync when CA changes externally (refresh / AI save)
   useEffect(()=>{setSubj(ca.full_content?.emailSubject||ca.subject||'');setSubjVersion(v=>v+1);},[ca.full_content?.emailSubject,ca.subject]);
   useEffect(()=>{setBody(ca.full_content?.drillDescription||ca.full_content?.emailBody||'');setBodyVersion(v=>v+1);},[ca.full_content?.drillDescription,ca.full_content?.emailBody]);
@@ -1263,6 +1265,19 @@ function EmailCard({ca,onUpdate}){
     }catch(e){setTestResult({ok:false,msg:'Network error: '+e.message});}
     setTestSending(false);
   }
+  async function doPreview(){
+    setPreviewing(true);
+    try{
+      // Save on-screen edits first so the preview is exactly what would send
+      if(isActionable){await onUpdate(ca.id,{full_content:buildFC({draft_saved:true}),subject:subj||ca.subject,preview_text:body});setDraftSaved(true);}
+      const res=await fetch(`${N8N}/webhook/email-broadcast-run`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ca_id:ca.id,preview:true})});
+      let data=null;try{data=await res.json();}catch(e){}
+      const item=Array.isArray(data)?data[0]:data;
+      if(item&&item.ok&&item.html)setPreviewDoc({subject:item.subject,html:item.html});
+      else alert('Preview failed — the renderer returned nothing. Check n8n.');
+    }catch(e){alert('Preview failed: '+e.message);}
+    setPreviewing(false);
+  }
   async function doAIBody(){
     if(!copyNote.trim()){alert('Add notes so AI knows how to rewrite the email body.');return;}
     setRegenerating(true);
@@ -1280,15 +1295,16 @@ function EmailCard({ca,onUpdate}){
 
   const inputStyle={background:C.s2,border:`1px solid ${C.bdB}`,borderRadius:6,padding:'8px 11px',fontSize:12,color:C.tx,width:'100%',outline:'none'};
 
-  // Test Send: composer/generic emails only — TDOW drip uses a different per-contact template, a generic test would be misleading
+  // Test Send + Preview: composer/generic emails only — TDOW drip uses a different per-contact template, a generic test would be misleading
   const testSendBox=isComposer?html`<div style=${{borderTop:`0.5px solid ${C.bd}`,paddingTop:12,marginTop:14}}>
-    <span style=${{fontSize:11,fontWeight:700,color:C.dm,letterSpacing:'0.4px',textTransform:'uppercase',display:'block',marginBottom:7}}>🧪 Test Send — one address only, list untouched</span>
+    <span style=${{fontSize:11,fontWeight:700,color:C.dm,letterSpacing:'0.4px',textTransform:'uppercase',display:'block',marginBottom:7}}>🧪 Test & Preview — list untouched</span>
     <div style=${{display:'flex',gap:8,flexWrap:'wrap',alignItems:'center'}}>
       <input type="email" value=${testEmail} onInput=${e=>setTestEmail(e.target.value)} placeholder="name@email.com"
         style=${{...inputStyle,fontSize:12,width:'auto',flex:'0 1 280px'}}/>
       <button onClick=${doTestSend} disabled=${testSending} style=${{background:testSending?'transparent':`${C.pu}16`,color:C.pu,border:`0.5px solid ${C.pu}50`,borderRadius:6,padding:'8px 16px',fontSize:12,fontWeight:700,cursor:testSending?'default':'pointer',opacity:testSending?0.6:1}}>${testSending?'⏳ Sending test…':'🧪 Send Test Email'}</button>
+      <button onClick=${doPreview} disabled=${previewing} style=${{background:previewing?'transparent':`${C.ac}14`,color:C.ac,border:`0.5px solid ${C.ac}45`,borderRadius:6,padding:'8px 16px',fontSize:12,fontWeight:700,cursor:previewing?'default':'pointer',opacity:previewing?0.6:1}}>${previewing?'⏳ Rendering…':'👁 Preview Email'}</button>
     </div>
-    <div style=${{color:C.mt,fontSize:10,marginTop:6}}>Sends "[TEST] ${subj||pieceTitle}" to this address only.${isActionable?' Your current edits are saved first.':''} Approval status is unchanged.</div>
+    <div style=${{color:C.mt,fontSize:10,marginTop:6}}>Test sends "[TEST] ${subj||pieceTitle}" to this address only.${isActionable?' Your current edits are saved first.':''} Approval status is unchanged. Tip: write <b>{{firstName}}</b> in the subject or body — each recipient sees their own first name (preview shows "Jason").</div>
     ${testResult?html`<div style=${{marginTop:8,padding:'6px 10px',borderRadius:6,background:testResult.ok?`${C.ok}12`:`${C.er}12`,color:testResult.ok?C.ok:C.er,fontSize:11}}>${testResult.ok?'✓ ':'✗ '}${testResult.msg}</div>`:''}
   </div>`:'';
 
@@ -1403,6 +1419,15 @@ function EmailCard({ca,onUpdate}){
         <button onClick=${doReopen} disabled=${busy} style=${{background:'transparent',color:C.dm,border:`0.5px solid ${C.bd}`,borderRadius:6,padding:'5px 12px',fontSize:11,cursor:'pointer'}}>Restore</button>
       </div>`:''}
     </div>
+    ${previewDoc?html`<div onClick=${()=>setPreviewDoc(null)} style=${{position:'fixed',inset:0,background:'rgba(0,0,0,0.72)',zIndex:1000,display:'flex',alignItems:'center',justifyContent:'center',padding:20}}>
+      <div onClick=${e=>e.stopPropagation()} style=${{background:'#fff',borderRadius:10,width:'100%',maxWidth:680,height:'85vh',display:'flex',flexDirection:'column',overflow:'hidden'}}>
+        <div style=${{padding:'10px 16px',background:C.s1,display:'flex',justifyContent:'space-between',alignItems:'center',gap:10,flexShrink:0}}>
+          <span style=${{color:C.tx,fontSize:13,fontWeight:600,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>👁 ${previewDoc.subject}</span>
+          <button onClick=${()=>setPreviewDoc(null)} style=${{background:'transparent',color:C.dm,border:`0.5px solid ${C.bd}`,borderRadius:6,padding:'4px 12px',fontSize:12,cursor:'pointer',flexShrink:0}}>✕ Close</button>
+        </div>
+        <iframe srcDoc=${previewDoc.html} sandbox="" style=${{flex:1,border:'none',width:'100%',background:'#f4f4f4'}} title="Email preview"/>
+      </div>
+    </div>`:''}
   </div>`;
 }
 
