@@ -1233,7 +1233,11 @@ function EmailCard({ca,onUpdate}){
   async function doBlastNow(){
     if(!confirm(`Blast "${subj||pieceTitle}" via Brevo to the live email list right now?`))return;
     setBlasting(true);setBlastResult(null);
-    fetch(`${N8N}/webhook/email-blast-run`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({weekOverride:ca.week_number,source:'app4_manual'})}).catch(()=>{});
+    // Composer/standalone emails → generic broadcast sender (by ca_id). TDOW drip emails → drip webhook (by week).
+    const isComposer=ca.full_content?.created_via==='app2_composer'||!ca.week_number;
+    const url=isComposer?`${N8N}/webhook/email-broadcast-run`:`${N8N}/webhook/email-blast-run`;
+    const payload=isComposer?{ca_id:ca.id,source:'app4_manual'}:{weekOverride:ca.week_number,source:'app4_manual'};
+    fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)}).catch(()=>{});
     setBlastResult({ok:true,msg:'Triggered — Telegram will confirm once the Brevo blast completes.'});
     setBlasting(false);
   }
