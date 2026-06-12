@@ -1193,6 +1193,9 @@ function EmailCard({ca,onUpdate}){
   const[blasting,setBlasting]=useState(false);
   const[blastResult,setBlastResult]=useState(null);
   const[note,setNote]=useState('');
+  const[testEmail,setTestEmail]=useState(()=>{try{return localStorage.getItem('omnira_test_email')||''}catch(e){return ''}});
+  const[testSending,setTestSending]=useState(false);
+  const[testResult,setTestResult]=useState(null);
   // Resync when CA changes externally (refresh / AI save)
   useEffect(()=>{setSubj(ca.full_content?.emailSubject||ca.subject||'');setSubjVersion(v=>v+1);},[ca.full_content?.emailSubject,ca.subject]);
   useEffect(()=>{setBody(ca.full_content?.drillDescription||ca.full_content?.emailBody||'');setBodyVersion(v=>v+1);},[ca.full_content?.drillDescription,ca.full_content?.emailBody]);
@@ -1202,11 +1205,14 @@ function EmailCard({ca,onUpdate}){
   const drive=ca.full_content?.driveVideoUrl||'';
   const isActionable=ca.status==='pending'||ca.status==='revision_requested';
   const isApproved=ca.status==='approved';
+  const isComposer=ca.full_content?.created_via==='app2_composer'||!ca.week_number;
+  const seriesLabel=isComposer?(ca.full_content?.seriesName||'Email Broadcast'):'Drill of the Week';
   const borderColor=ca.status==='pending'?C.bdB:ca.status==='approved'?C.ok+'50':ca.status==='revision_requested'?C.pu+'50':C.bd;
   const st=CA_STATUS_MAP[ca.status]||{l:ca.status,c:C.dm,icon:''};
 
   function flashMsg(msg){setSaveMsg(msg);setTimeout(()=>setSaveMsg(''),3000);}
-  function buildFC(extra={}){return {...ca.full_content,emailSubject:subj,drillDescription:body,youtubeUrl:newYt,driveVideoUrl:newDrive,...extra};}
+  // Dual-write body to BOTH fields — broadcast sender reads emailBody first, drip reads drillDescription (single source of truth)
+  function buildFC(extra={}){return {...ca.full_content,emailSubject:subj,drillDescription:body,emailBody:body,youtubeUrl:newYt,driveVideoUrl:newDrive,...extra};}
 
   async function doSaveDraft(){
     setBusy(true);
@@ -1234,12 +1240,28 @@ function EmailCard({ca,onUpdate}){
     if(!confirm(`Blast "${subj||pieceTitle}" via Brevo to the live email list right now?`))return;
     setBlasting(true);setBlastResult(null);
     // Composer/standalone emails → generic broadcast sender (by ca_id). TDOW drip emails → drip webhook (by week).
-    const isComposer=ca.full_content?.created_via==='app2_composer'||!ca.week_number;
     const url=isComposer?`${N8N}/webhook/email-broadcast-run`:`${N8N}/webhook/email-blast-run`;
     const payload=isComposer?{ca_id:ca.id,source:'app4_manual'}:{weekOverride:ca.week_number,source:'app4_manual'};
     fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)}).catch(()=>{});
     setBlastResult({ok:true,msg:'Triggered — Telegram will confirm once the Brevo blast completes.'});
     setBlasting(false);
+  }
+  async function doTestSend(){
+    const addr=testEmail.trim();
+    if(!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(addr)){setTestResult({ok:false,msg:'Enter a valid email address first.'});return;}
+    setTestSending(true);setTestResult(null);
+    try{
+      // Save on-screen edits first so the test reflects exactly what's in the editor
+      if(isActionable){await onUpdate(ca.id,{full_content:buildFC({draft_saved:true}),subject:subj||ca.subject,preview_text:body});setDraftSaved(true);}
+      try{localStorage.setItem('omnira_test_email',addr);}catch(e){}
+      const res=await fetch(`${N8N}/webhook/email-broadcast-run`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ca_id:ca.id,test_email:addr,source:'app4_test'})});
+      let data=null;try{data=await res.json();}catch(e){}
+      const item=Array.isArray(data)?data[0]:data;
+      if(res.ok&&item&&item.ok&&item.sent>0)setTestResult({ok:true,msg:`Test sent to ${addr} — check the inbox (and spam). The live list was NOT touched.`});
+      else if(res.ok)setTestResult({ok:true,msg:'Triggered — Telegram will confirm the test result.'});
+      else setTestResult({ok:false,msg:`Webhook error (${res.status}) — check Telegram / n8n.`});
+    }catch(e){setTestResult({ok:false,msg:'Network error: '+e.message});}
+    setTestSending(false);
   }
   async function doAIBody(){
     if(!copyNote.trim()){alert('Add notes so AI knows how to rewrite the email body.');return;}
@@ -1250,7 +1272,7 @@ function EmailCard({ca,onUpdate}){
       const res=await fetch(`${N8N}/webhook/claude-proxy`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({system:sys,prompt:usr})});
       const raw=await res.text();let data;try{data=JSON.parse(raw);}catch{throw new Error('Bad response: '+raw.slice(0,100));}
       const nt=(data?.content?.[0]?.text||data?.[0]?.content?.[0]?.text||data?.body?.content?.[0]?.text||'').trim();
-      if(nt){setBody(nt);setBodyVersion(v=>v+1);setCopyEditMode('manual');await onUpdate(ca.id,{full_content:buildFC({drillDescription:nt,draft_saved:true}),preview_text:nt});setDraftSaved(true);setCopyNote('');flashMsg('✓ AI body saved — review above');}
+      if(nt){setBody(nt);setBodyVersion(v=>v+1);setCopyEditMode('manual');await onUpdate(ca.id,{full_content:buildFC({drillDescription:nt,emailBody:nt,draft_saved:true}),preview_text:nt});setDraftSaved(true);setCopyNote('');flashMsg('✓ AI body saved — review above');}
       else alert('Claude returned empty response.');
     }catch(e){alert('AI rewrite failed: '+e.message);}
     setRegenerating(false);
@@ -1258,11 +1280,23 @@ function EmailCard({ca,onUpdate}){
 
   const inputStyle={background:C.s2,border:`1px solid ${C.bdB}`,borderRadius:6,padding:'8px 11px',fontSize:12,color:C.tx,width:'100%',outline:'none'};
 
+  // Test Send: composer/generic emails only — TDOW drip uses a different per-contact template, a generic test would be misleading
+  const testSendBox=isComposer?html`<div style=${{borderTop:`0.5px solid ${C.bd}`,paddingTop:12,marginTop:14}}>
+    <span style=${{fontSize:11,fontWeight:700,color:C.dm,letterSpacing:'0.4px',textTransform:'uppercase',display:'block',marginBottom:7}}>🧪 Test Send — one address only, list untouched</span>
+    <div style=${{display:'flex',gap:8,flexWrap:'wrap',alignItems:'center'}}>
+      <input type="email" value=${testEmail} onInput=${e=>setTestEmail(e.target.value)} placeholder="name@email.com"
+        style=${{...inputStyle,fontSize:12,width:'auto',flex:'0 1 280px'}}/>
+      <button onClick=${doTestSend} disabled=${testSending} style=${{background:testSending?'transparent':`${C.pu}16`,color:C.pu,border:`0.5px solid ${C.pu}50`,borderRadius:6,padding:'8px 16px',fontSize:12,fontWeight:700,cursor:testSending?'default':'pointer',opacity:testSending?0.6:1}}>${testSending?'⏳ Sending test…':'🧪 Send Test Email'}</button>
+    </div>
+    <div style=${{color:C.mt,fontSize:10,marginTop:6}}>Sends "[TEST] ${subj||pieceTitle}" to this address only.${isActionable?' Your current edits are saved first.':''} Approval status is unchanged.</div>
+    ${testResult?html`<div style=${{marginTop:8,padding:'6px 10px',borderRadius:6,background:testResult.ok?`${C.ok}12`:`${C.er}12`,color:testResult.ok?C.ok:C.er,fontSize:11}}>${testResult.ok?'✓ ':'✗ '}${testResult.msg}</div>`:''}
+  </div>`:'';
+
   return html`<div style=${{background:C.s1,border:`0.5px solid ${borderColor}`,borderRadius:10,marginBottom:12,overflow:'hidden',animation:'fadeIn 0.2s ease'}}>
     <div style=${{padding:'12px 16px',display:'flex',justifyContent:'space-between',alignItems:'flex-start',gap:12,borderBottom:`0.5px solid ${C.bd}`}}>
       <div style=${{flex:1,minWidth:0}}>
         <div style=${{display:'flex',alignItems:'center',gap:7,flexWrap:'wrap',marginBottom:4}}>
-          <span style=${{background:'rgba(74,134,245,0.15)',color:'#4a86f5',border:'0.5px solid rgba(74,134,245,0.35)',borderRadius:10,padding:'2px 9px',fontSize:10,fontWeight:700}}>📧 Drill of the Week · Email</span>
+          <span style=${{background:'rgba(74,134,245,0.15)',color:'#4a86f5',border:'0.5px solid rgba(74,134,245,0.35)',borderRadius:10,padding:'2px 9px',fontSize:10,fontWeight:700}}>📧 ${seriesLabel} · Email</span>
           ${ca.week_number?html`<span style=${{color:C.ac,fontWeight:800,fontSize:12}}>Wk ${ca.week_number}</span>`:''}
           <span style=${{color:C.tx,fontWeight:600,fontSize:14}}>${pieceTitle}</span>
         </div>
@@ -1321,6 +1355,8 @@ function EmailCard({ca,onUpdate}){
             </div>
           </div>
 
+          ${testSendBox}
+
           <!-- BOTTOM ACTIONS -->
           <div style=${{borderTop:`0.5px solid ${C.bd}`,paddingTop:14,marginTop:14}}>
             ${rejectMode
@@ -1355,11 +1391,12 @@ function EmailCard({ca,onUpdate}){
       }
       ${isApproved?html`<div style=${{marginTop:14,paddingTop:14,borderTop:`0.5px solid ${C.bd}`}}>
         <div style=${{display:'flex',alignItems:'center',gap:10,flexWrap:'wrap',marginBottom:8}}>
-          <span style=${{color:C.ok,fontSize:12}}>✓ Approved — blasts Tuesday ${fmtDay(ca.scheduled_for)}</span>
+          <span style=${{color:C.ok,fontSize:12}}>✓ Approved — ${isComposer?'sends':'blasts Tuesday'} ${fmtDay(ca.scheduled_for)}</span>
           <button onClick=${doBlastNow} disabled=${busy||blasting} style=${{background:blasting?'transparent':`${C.ok}18`,color:C.ok,border:`0.5px solid ${C.ok}50`,borderRadius:6,padding:'5px 14px',fontSize:12,fontWeight:700,cursor:(busy||blasting)?'default':'pointer',opacity:(busy||blasting)?0.6:1}}>${blasting?'⏳ Firing…':'📧 Blast Now'}</button>
           <button onClick=${doReopen} disabled=${busy} style=${{background:'transparent',color:C.dm,border:`0.5px solid ${C.bd}`,borderRadius:6,padding:'5px 12px',fontSize:11,cursor:'pointer',opacity:busy?0.6:1}}>Re-open for Revision</button>
         </div>
         ${blastResult?html`<div style=${{padding:'6px 10px',borderRadius:6,background:blastResult.ok?`${C.ok}12`:`${C.er}12`,color:blastResult.ok?C.ok:C.er,fontSize:11}}>${blastResult.ok?'✓ ':'✗ '}${blastResult.msg}</div>`:''}
+        ${testSendBox}
       </div>`:''}
       ${ca.status==='skipped'?html`<div style=${{marginTop:14,paddingTop:14,borderTop:`0.5px solid ${C.bd}`,display:'flex',alignItems:'center',gap:12}}>
         <span style=${{color:C.er,fontSize:12}}>✗ Skipped — will not blast this Tuesday</span>
