@@ -158,6 +158,11 @@ const db={
     try{const r=await fetch(`${SB_URL}/rest/v1/content_approvals?content_type=eq.social&select=id,week_number,subject,status,scheduled_for,approved_at,full_content,preview_text&order=week_number.asc`,{headers:SBH});const d=await r.json();return Array.isArray(d)?d:[];}
     catch{return[];}
   },
+  async getEmailCAs(){
+    try{const r=await fetch(`${SB_URL}/rest/v1/content_approvals?content_type=eq.email&select=id,week_number,subject,status,scheduled_for,approved_at,full_content,preview_text&order=scheduled_for.asc`,{headers:SBH});const d=await r.json();return Array.isArray(d)?d:[];}
+    catch{return[];}
+  },
+  // Generic CA patch (used by both social + email cards) — content_approvals is the single source of truth
   async updateSocialCA(id,patch){
     try{await fetch(`${SB_URL}/rest/v1/content_approvals?id=eq.${id}`,{method:'PATCH',headers:{...SBH,'Prefer':'return=minimal'},body:JSON.stringify({...patch,updated_at:new Date().toISOString()})});}
     catch(e){console.error(e);}
@@ -1167,6 +1172,199 @@ function SocialCaptionCard({ca,onUpdate}){
   </div>`;
 }
 
+// ── EMAIL SERIES CARD ─────────────────────────────────────────
+// Generic: works for ANY email series (identified by subject/series title), not just TDOW.
+// content_approvals is the single source of truth; Brevo is send-only.
+function EmailCard({ca,onUpdate}){
+  const[subj,setSubj]=useState(ca.full_content?.emailSubject||ca.subject||'');
+  const[body,setBody]=useState(ca.full_content?.drillDescription||ca.full_content?.emailBody||'');
+  const[copyNote,setCopyNote]=useState('');
+  const[copyEditMode,setCopyEditMode]=useState('manual');
+  const[busy,setBusy]=useState(false);
+  const[regenerating,setRegenerating]=useState(false);
+  const[bodyVersion,setBodyVersion]=useState(0);
+  const[subjVersion,setSubjVersion]=useState(0);
+  const[newYt,setNewYt]=useState(ca.full_content?.youtubeUrl||ca.full_content?.youtube_url||'');
+  const[newDrive,setNewDrive]=useState(ca.full_content?.driveVideoUrl||'');
+  const[saveMsg,setSaveMsg]=useState('');
+  const[rejectMode,setRejectMode]=useState(false);
+  const[rejectRemark,setRejectRemark]=useState('');
+  const[draftSaved,setDraftSaved]=useState(!!(ca.full_content?.draft_saved));
+  const[blasting,setBlasting]=useState(false);
+  const[blastResult,setBlastResult]=useState(null);
+  const[note,setNote]=useState('');
+  // Resync when CA changes externally (refresh / AI save)
+  useEffect(()=>{setSubj(ca.full_content?.emailSubject||ca.subject||'');setSubjVersion(v=>v+1);},[ca.full_content?.emailSubject,ca.subject]);
+  useEffect(()=>{setBody(ca.full_content?.drillDescription||ca.full_content?.emailBody||'');setBodyVersion(v=>v+1);},[ca.full_content?.drillDescription,ca.full_content?.emailBody]);
+
+  const pieceTitle=ca.full_content?.drillName||(ca.subject||'').replace(/^.*?Wk\d+:\s*/i,'')||'Untitled';
+  const yt=ca.full_content?.youtubeUrl||ca.full_content?.youtube_url||'';
+  const drive=ca.full_content?.driveVideoUrl||'';
+  const isActionable=ca.status==='pending'||ca.status==='revision_requested';
+  const isApproved=ca.status==='approved';
+  const borderColor=ca.status==='pending'?C.bdB:ca.status==='approved'?C.ok+'50':ca.status==='revision_requested'?C.pu+'50':C.bd;
+  const st=CA_STATUS_MAP[ca.status]||{l:ca.status,c:C.dm,icon:''};
+
+  function flashMsg(msg){setSaveMsg(msg);setTimeout(()=>setSaveMsg(''),3000);}
+  function buildFC(extra={}){return {...ca.full_content,emailSubject:subj,drillDescription:body,youtubeUrl:newYt,driveVideoUrl:newDrive,...extra};}
+
+  async function doSaveDraft(){
+    setBusy(true);
+    await onUpdate(ca.id,{full_content:buildFC({draft_saved:true}),subject:subj||ca.subject,preview_text:body});
+    setDraftSaved(true);flashMsg('✓ Saved as draft');setBusy(false);
+  }
+  async function doSaveApprove(){
+    setBusy(true);
+    await onUpdate(ca.id,{status:'approved',approved_at:new Date().toISOString(),full_content:buildFC(),subject:subj||ca.subject,preview_text:body});
+    setBusy(false);
+  }
+  async function doConfirmReject(){
+    if(!rejectRemark.trim()&&!confirm('Reject without a reason?'))return;
+    setBusy(true);
+    await onUpdate(ca.id,{status:'skipped',full_content:buildFC({rejection_reason:rejectRemark})});
+    setRejectMode(false);setBusy(false);
+  }
+  async function doReopen(){setBusy(true);await onUpdate(ca.id,{status:'pending',approved_at:null});setBusy(false);}
+  async function doSaveOnly(){
+    setBusy(true);
+    await onUpdate(ca.id,{full_content:buildFC({draft_saved:true}),subject:subj||ca.subject,preview_text:body});
+    setDraftSaved(true);flashMsg('✓ Saved');setBusy(false);
+  }
+  async function doBlastNow(){
+    if(!confirm(`Blast "${subj||pieceTitle}" via Brevo to the live email list right now?`))return;
+    setBlasting(true);setBlastResult(null);
+    fetch(`${N8N}/webhook/email-blast-run`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({weekOverride:ca.week_number,source:'app4_manual'})}).catch(()=>{});
+    setBlastResult({ok:true,msg:'Triggered — Telegram will confirm once the Brevo blast completes.'});
+    setBlasting(false);
+  }
+  async function doAIBody(){
+    if(!copyNote.trim()){alert('Add notes so AI knows how to rewrite the email body.');return;}
+    setRegenerating(true);
+    const sys='You are an expert email marketing copywriter for Titan Ball Machines MY, a pickleball equipment brand in Malaysia. Write concise, engaging email copy.';
+    const usr=`Rewrite this email body copy for the "${pieceTitle}" email based on the feedback.\n\nCurrent body:\n${body||'(empty)'}\n\nRevision notes: ${copyNote}\n\nWrite ONLY the revised body copy. No preamble or labels.`;
+    try{
+      const res=await fetch(`${N8N}/webhook/claude-proxy`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({system:sys,prompt:usr})});
+      const raw=await res.text();let data;try{data=JSON.parse(raw);}catch{throw new Error('Bad response: '+raw.slice(0,100));}
+      const nt=(data?.content?.[0]?.text||data?.[0]?.content?.[0]?.text||data?.body?.content?.[0]?.text||'').trim();
+      if(nt){setBody(nt);setBodyVersion(v=>v+1);setCopyEditMode('manual');await onUpdate(ca.id,{full_content:buildFC({drillDescription:nt,draft_saved:true}),preview_text:nt});setDraftSaved(true);setCopyNote('');flashMsg('✓ AI body saved — review above');}
+      else alert('Claude returned empty response.');
+    }catch(e){alert('AI rewrite failed: '+e.message);}
+    setRegenerating(false);
+  }
+
+  const inputStyle={background:C.s2,border:`1px solid ${C.bdB}`,borderRadius:6,padding:'8px 11px',fontSize:12,color:C.tx,width:'100%',outline:'none'};
+
+  return html`<div style=${{background:C.s1,border:`0.5px solid ${borderColor}`,borderRadius:10,marginBottom:12,overflow:'hidden',animation:'fadeIn 0.2s ease'}}>
+    <div style=${{padding:'12px 16px',display:'flex',justifyContent:'space-between',alignItems:'flex-start',gap:12,borderBottom:`0.5px solid ${C.bd}`}}>
+      <div style=${{flex:1,minWidth:0}}>
+        <div style=${{display:'flex',alignItems:'center',gap:7,flexWrap:'wrap',marginBottom:4}}>
+          <span style=${{background:'rgba(74,134,245,0.15)',color:'#4a86f5',border:'0.5px solid rgba(74,134,245,0.35)',borderRadius:10,padding:'2px 9px',fontSize:10,fontWeight:700}}>📧 Drill of the Week · Email</span>
+          ${ca.week_number?html`<span style=${{color:C.ac,fontWeight:800,fontSize:12}}>Wk ${ca.week_number}</span>`:''}
+          <span style=${{color:C.tx,fontWeight:600,fontSize:14}}>${pieceTitle}</span>
+        </div>
+        <div style=${{color:C.mt,fontSize:11}}>📅 ${fmtDay(ca.scheduled_for)} · Brevo email blast</div>
+      </div>
+      <div style=${{display:'flex',alignItems:'center',gap:6,flexShrink:0}}>
+        ${(isActionable&&draftSaved)&&html`<span style=${{background:'rgba(251,191,36,0.12)',color:'#fbbf24',border:'0.5px solid rgba(251,191,36,0.3)',borderRadius:10,padding:'2px 8px',fontSize:10,fontWeight:600}}>📝 Saved Revision</span>`}
+        <span style=${{background:`${st.c}15`,color:st.c,border:`0.5px solid ${st.c}35`,borderRadius:20,padding:'3px 10px',fontSize:11,fontWeight:600,whiteSpace:'nowrap'}}>${st.icon} ${st.l}</span>
+      </div>
+    </div>
+
+    <div style=${{padding:'14px 16px'}}>
+      ${isActionable
+        ?html`<div>
+          <!-- SUBJECT -->
+          <div style=${{marginBottom:14}}>
+            <span style=${{fontSize:11,fontWeight:700,color:C.dm,letterSpacing:'0.4px',textTransform:'uppercase',display:'block',marginBottom:7}}>✉️ Email Subject</span>
+            <input key=${subjVersion} defaultValue=${subj} onChange=${e=>setSubj(e.target.value)}
+              placeholder="Subject line recipients see…" style=${inputStyle}/>
+          </div>
+
+          <!-- BODY COPY -->
+          <div>
+            <div style=${{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:10}}>
+              <span style=${{fontSize:11,fontWeight:700,color:C.dm,letterSpacing:'0.4px',textTransform:'uppercase'}}>📝 Body Copy</span>
+              <div style=${{display:'flex',background:C.s3,borderRadius:5,padding:2,border:`0.5px solid ${C.bd}`}}>
+                <button onClick=${()=>setCopyEditMode('manual')} style=${{background:copyEditMode==='manual'?C.s1:'transparent',border:'none',borderRadius:3,color:copyEditMode==='manual'?C.tx:C.mt,padding:'3px 10px',fontSize:11,cursor:'pointer',fontWeight:copyEditMode==='manual'?600:400}}>✏ Edit Directly</button>
+                <button onClick=${()=>setCopyEditMode('ai')} style=${{background:copyEditMode==='ai'?C.s1:'transparent',border:'none',borderRadius:3,color:copyEditMode==='ai'?C.tx:C.mt,padding:'3px 10px',fontSize:11,cursor:'pointer',fontWeight:copyEditMode==='ai'?600:400}}>🤖 AI Feedback</button>
+              </div>
+            </div>
+            ${copyEditMode==='manual'
+              ?html`<textarea key=${bodyVersion} defaultValue=${body} onChange=${e=>setBody(e.target.value)}
+                  placeholder="Email body copy / drill description — what recipients read…"
+                  style=${{...inputStyle,lineHeight:1.7,resize:'vertical',minHeight:120}}/>`
+              :html`<textarea value=${copyNote} onInput=${e=>setCopyNote(e.target.value)}
+                  placeholder="Describe what to change — tone, angle, what to add or remove…"
+                  style=${{...inputStyle,lineHeight:1.6,resize:'vertical',minHeight:80}}/>`
+            }
+            <button onClick=${copyEditMode==='manual'?doSaveOnly:doAIBody} disabled=${busy||regenerating}
+              style=${{marginTop:8,background:`${C.ac}14`,color:C.ac,border:`0.5px solid ${C.ac}45`,borderRadius:6,padding:'7px 16px',fontSize:12,fontWeight:600,cursor:(busy||regenerating)?'default':'pointer',opacity:(busy||regenerating)?0.6:1}}>
+              ${regenerating?'🤖 Rewriting…':(busy?'Saving…':(copyEditMode==='ai'?'🤖 Request Copy Revision':'💾 Save Copy'))}
+            </button>
+            ${saveMsg&&html`<span style=${{display:'block',marginTop:7,color:C.ok,fontSize:12,fontWeight:600}}>${saveMsg}</span>`}
+          </div>
+
+          <!-- LINKS -->
+          <div style=${{borderTop:`0.5px solid ${C.bd}`,paddingTop:14,marginTop:14}}>
+            <span style=${{fontSize:11,fontWeight:700,color:C.dm,letterSpacing:'0.4px',textTransform:'uppercase',display:'block',marginBottom:10}}>🔗 Links (optional)</span>
+            <div style=${{marginBottom:8}}>
+              <label style=${{display:'block',fontSize:11,color:C.dm,marginBottom:4}}>YouTube URL:</label>
+              <input value=${newYt} onInput=${e=>setNewYt(e.target.value)} placeholder="${yt||'No YouTube URL set'}" style=${{...inputStyle,fontSize:11}}/>
+            </div>
+            <div>
+              <label style=${{display:'block',fontSize:11,color:C.dm,marginBottom:4}}>Drive / video URL:</label>
+              <input value=${newDrive} onInput=${e=>setNewDrive(e.target.value)} placeholder="${drive||'No Drive/video URL set'}" style=${{...inputStyle,fontSize:11}}/>
+            </div>
+          </div>
+
+          <!-- BOTTOM ACTIONS -->
+          <div style=${{borderTop:`0.5px solid ${C.bd}`,paddingTop:14,marginTop:14}}>
+            ${rejectMode
+              ?html`<div>
+                <div style=${{color:C.er,fontSize:12,marginBottom:7,fontWeight:600}}>Why are you rejecting this? (saved for reference)</div>
+                <textarea value=${rejectRemark} onInput=${e=>setRejectRemark(e.target.value)} autoFocus
+                  placeholder="e.g. plan changed, wrong angle, replaced…"
+                  style=${{...inputStyle,border:`1px solid ${C.er}50`,resize:'vertical',minHeight:60,marginBottom:10,lineHeight:1.5}}/>
+                <div style=${{display:'flex',gap:8}}>
+                  <button onClick=${doConfirmReject} disabled=${busy} style=${{background:`${C.er}14`,color:C.er,border:`0.5px solid ${C.er}50`,borderRadius:6,padding:'7px 16px',fontSize:12,fontWeight:600,cursor:busy?'default':'pointer',opacity:busy?0.6:1}}>Confirm Reject</button>
+                  <button onClick=${()=>{setRejectMode(false);setRejectRemark('');}} style=${{background:'transparent',color:C.dm,border:`0.5px solid ${C.bd}`,borderRadius:6,padding:'7px 14px',fontSize:12,cursor:'pointer'}}>Cancel</button>
+                </div>
+              </div>`
+              :html`<div style=${{display:'flex',gap:8,flexWrap:'wrap',alignItems:'center'}}>
+                <button onClick=${doSaveDraft} disabled=${busy} style=${{background:`${C.ac}12`,color:C.ac,border:`0.5px solid ${C.ac}45`,borderRadius:6,padding:'8px 18px',fontSize:13,fontWeight:600,cursor:busy?'default':'pointer',opacity:busy?0.6:1}}>${busy?'Saving…':'💾 Save as Draft'}</button>
+                <button onClick=${doSaveApprove} disabled=${busy} style=${{background:C.ok,color:'#0a1a0a',border:'none',borderRadius:6,padding:'8px 20px',fontSize:13,fontWeight:700,cursor:busy?'default':'pointer',opacity:busy?0.6:1}}>✓ Save & Approve</button>
+                <button onClick=${()=>setRejectMode(true)} style=${{background:'transparent',color:C.er,border:`0.5px solid ${C.er}45`,borderRadius:6,padding:'8px 15px',fontSize:13,cursor:'pointer'}}>✗ Reject</button>
+              </div>`
+            }
+          </div>
+        </div>`
+        :html`<div>
+          <div style=${{fontSize:11,color:C.mt,marginBottom:4}}>Subject:</div>
+          <div style=${{background:C.s2,border:`0.5px solid ${isApproved?C.ok+'50':C.bd}`,borderRadius:6,padding:'8px 12px',fontSize:13,color:C.tx,fontWeight:600,marginBottom:8}}>${subj||'No subject set.'}</div>
+          <div style=${{fontSize:11,color:C.mt,marginBottom:4}}>Body:</div>
+          <div style=${{background:C.s2,border:`0.5px solid ${C.bd}`,borderRadius:8,padding:'12px 14px',fontSize:13,lineHeight:1.75,color:C.tx,whiteSpace:'pre-wrap',maxHeight:200,overflowY:'auto'}}>${body||'No body set.'}</div>
+          ${(yt||drive)&&html`<div style=${{marginTop:8,padding:'7px 10px',background:C.s2+'60',borderRadius:6,fontSize:11,color:C.dm,lineHeight:1.8}}>
+            ${yt?html`<div>▶️ <a href=${yt} target="_blank" style=${{color:C.ac,textDecoration:'none'}}>${yt}</a></div>`:''}
+            ${drive?html`<div>🎬 ${drive.split('/').pop()}</div>`:''}
+          </div>`}
+        </div>`
+      }
+      ${isApproved?html`<div style=${{marginTop:14,paddingTop:14,borderTop:`0.5px solid ${C.bd}`}}>
+        <div style=${{display:'flex',alignItems:'center',gap:10,flexWrap:'wrap',marginBottom:8}}>
+          <span style=${{color:C.ok,fontSize:12}}>✓ Approved — blasts Tuesday ${fmtDay(ca.scheduled_for)}</span>
+          <button onClick=${doBlastNow} disabled=${busy||blasting} style=${{background:blasting?'transparent':`${C.ok}18`,color:C.ok,border:`0.5px solid ${C.ok}50`,borderRadius:6,padding:'5px 14px',fontSize:12,fontWeight:700,cursor:(busy||blasting)?'default':'pointer',opacity:(busy||blasting)?0.6:1}}>${blasting?'⏳ Firing…':'📧 Blast Now'}</button>
+          <button onClick=${doReopen} disabled=${busy} style=${{background:'transparent',color:C.dm,border:`0.5px solid ${C.bd}`,borderRadius:6,padding:'5px 12px',fontSize:11,cursor:'pointer',opacity:busy?0.6:1}}>Re-open for Revision</button>
+        </div>
+        ${blastResult?html`<div style=${{padding:'6px 10px',borderRadius:6,background:blastResult.ok?`${C.ok}12`:`${C.er}12`,color:blastResult.ok?C.ok:C.er,fontSize:11}}>${blastResult.ok?'✓ ':'✗ '}${blastResult.msg}</div>`:''}
+      </div>`:''}
+      ${ca.status==='skipped'?html`<div style=${{marginTop:14,paddingTop:14,borderTop:`0.5px solid ${C.bd}`,display:'flex',alignItems:'center',gap:12}}>
+        <span style=${{color:C.er,fontSize:12}}>✗ Skipped — will not blast this Tuesday</span>
+        <button onClick=${doReopen} disabled=${busy} style=${{background:'transparent',color:C.dm,border:`0.5px solid ${C.bd}`,borderRadius:6,padding:'5px 12px',fontSize:11,cursor:'pointer'}}>Restore</button>
+      </div>`:''}
+    </div>
+  </div>`;
+}
+
 // ── DEPLOYMENT TAB ────────────────────────────────────────────
 function DeploymentTab({deployments,clients}){
   const[l1,setL1]=useState('all');
@@ -1675,11 +1873,12 @@ function App(){
   const[archive,setArchive]=useState([]);
   const[schedClientMap,setSchedClientMap]=useState({});
   const[socialCAs,setSocialCAs]=useState([]);
+  const[emailCAs,setEmailCAs]=useState([]);
 
   const loadData=useCallback(async(silent=false)=>{
     if(!silent)setLoading(true);
-    const[q,c,m,sched,deps,arc,socCAs]=await Promise.all([db.getQueue(),db.getClients(),db.getMediaAssets(),db.getContentSchedule(),db.getDeployments(),db.getArchive(),db.getSocialCAs()]);
-    setCopyItems(q);setClients(c);setMediaAssets(m);setSchedule(sched);setDeployments(deps);setArchive(arc);setSocialCAs(socCAs);
+    const[q,c,m,sched,deps,arc,socCAs,emCAs]=await Promise.all([db.getQueue(),db.getClients(),db.getMediaAssets(),db.getContentSchedule(),db.getDeployments(),db.getArchive(),db.getSocialCAs(),db.getEmailCAs()]);
+    setCopyItems(q);setClients(c);setMediaAssets(m);setSchedule(sched);setDeployments(deps);setArchive(arc);setSocialCAs(socCAs);setEmailCAs(emCAs);
     // Build week-number + scheduled_for map keyed by campaign_asset id (for Real Gains)
     const rgMap={};
     sched.filter(s=>s.content_type==='real_gains').forEach(s=>{
@@ -1718,6 +1917,18 @@ function App(){
   async function handleSocialCAUpdate(id,patch){
     await db.updateSocialCA(id,patch);
     setSocialCAs(prev=>prev.map(ca=>ca.id===id?{...ca,...patch}:ca));
+  }
+  async function handleEmailCAUpdate(id,patch){
+    await db.updateSocialCA(id,patch);
+    setEmailCAs(prev=>prev.map(ca=>ca.id===id?{...ca,...patch}:ca));
+  }
+  async function handleBulkApproveEmail(){
+    const pending=emailCAs.filter(ca=>ca.status==='pending');
+    if(!pending.length)return;
+    if(!confirm(`Approve all ${pending.length} pending emails? They will blast on their scheduled Tuesdays.`))return;
+    const now2=new Date().toISOString();
+    await Promise.all(pending.map(ca=>db.updateSocialCA(ca.id,{status:'approved',approved_at:now2})));
+    setEmailCAs(prev=>prev.map(ca=>ca.status==='pending'?{...ca,status:'approved',approved_at:now2}:ca));
   }
   async function handleBulkApproveSocial(){
     const pending=socialCAs.filter(ca=>ca.status==='pending');
@@ -1774,9 +1985,11 @@ function App(){
   const CA_TO_STATUS={pending:'pending_review',approved:'approved',skipped:'rejected',published:'published',revision_requested:'revision_requested'};
   const soCACounts={all:socialCAs.length,pending_review:0,approved:0,rejected:0,published:0,revision_requested:0,generating:0};
   socialCAs.forEach(ca=>{const k=CA_TO_STATUS[ca.status];if(k)soCACounts[k]=(soCACounts[k]||0)+1;});
+  const emCACounts={all:emailCAs.length,pending_review:0,approved:0,rejected:0,published:0,revision_requested:0,generating:0};
+  emailCAs.forEach(ca=>{const k=CA_TO_STATUS[ca.status];if(k)emCACounts[k]=(emCACounts[k]||0)+1;});
   // Combined counts for Content tab
-  const contentCounts={all:copyItems.length+mediaAssets.length+socialCAs.length};
-  Object.keys(STATUS).forEach(s=>{contentCounts[s]=(copyCounts[s]||0)+(mediaCounts[s]||0)+(soCACounts[s]||0);});
+  const contentCounts={all:copyItems.length+mediaAssets.length+socialCAs.length+emailCAs.length};
+  Object.keys(STATUS).forEach(s=>{contentCounts[s]=(copyCounts[s]||0)+(mediaCounts[s]||0)+(soCACounts[s]||0)+(emCACounts[s]||0);});
 
   // Campaign detector for media assets
   const assetCampaign=asset=>{
@@ -1792,6 +2005,11 @@ function App(){
   });
   const filteredSocialCAs=socialCAs.filter(ca=>{
     if(filterCampaign!=='all'&&filterCampaign!=='social')return false;
+    if(filterStatus!=='all'&&CA_TO_STATUS[ca.status]!==filterStatus)return false;
+    return true;
+  });
+  const filteredEmailCAs=emailCAs.filter(ca=>{
+    if(filterCampaign!=='all'&&filterCampaign!=='email')return false;
     if(filterStatus!=='all'&&CA_TO_STATUS[ca.status]!==filterStatus)return false;
     return true;
   });
@@ -1885,7 +2103,10 @@ function App(){
             const copyFiltered=(k==='all')
               ?(filterStatus==='all'?copyItems:copyItems.filter(i=>i.status===filterStatus))
               :[];
-            const cnt=mediaFiltered.length+caFiltered.length+copyFiltered.length;
+            const emCaFiltered=(k==='all'||k==='email')
+              ?(filterStatus==='all'?emailCAs:emailCAs.filter(ca=>CA_TO_STATUS[ca.status]===filterStatus))
+              :[];
+            const cnt=mediaFiltered.length+caFiltered.length+copyFiltered.length+emCaFiltered.length;
             const active=filterCampaign===k;
             return html`<button key=${k} onClick=${()=>{setFilterCampaign(k);}} style=${{
               background:active?color+'22':'transparent',color:active?color:'#5a8ab0',
@@ -1927,9 +2148,9 @@ function App(){
                 <span style=${{color:'#5a8ab0',fontSize:12,flex:1}}>${pendingArchiveCleanup} asset${pendingArchiveCleanup!==1?'s':''} published or rejected — open them to archive or delete and free up space.</span>
                 <button onClick=${()=>{setFilterStatus('published');}} style=${{background:'transparent',color:'#2dd4bf',border:'0.5px solid rgba(45,212,191,0.4)',borderRadius:6,padding:'4px 12px',fontSize:11,cursor:'pointer'}}>View Published</button>
               </div>`}
-              ${filteredMedia.length===0&&filteredCopy.length===0&&filteredSocialCAs.length===0&&html`<div style=${{textAlign:'center',padding:'80px 20px',color:C.mt}}>
-                  <div style=${{fontSize:32,marginBottom:12}}>${mediaAssets.length===0&&copyItems.length===0&&socialCAs.length===0?'📭':'🔍'}</div>
-                  <div style=${{fontSize:14}}>${mediaAssets.length===0&&copyItems.length===0&&socialCAs.length===0?'No content yet — run a campaign to generate assets':'No content matches current filters'}</div>
+              ${filteredMedia.length===0&&filteredCopy.length===0&&filteredSocialCAs.length===0&&filteredEmailCAs.length===0&&html`<div style=${{textAlign:'center',padding:'80px 20px',color:C.mt}}>
+                  <div style=${{fontSize:32,marginBottom:12}}>${mediaAssets.length===0&&copyItems.length===0&&socialCAs.length===0&&emailCAs.length===0?'📭':'🔍'}</div>
+                  <div style=${{fontSize:14}}>${mediaAssets.length===0&&copyItems.length===0&&socialCAs.length===0&&emailCAs.length===0?'No content yet — run a campaign to generate assets':'No content matches current filters'}</div>
                 </div>`}
               <!-- Media assets grid -->
               ${filteredMedia.length>0&&html`<div style=${{display:'grid',gridTemplateColumns:'repeat(auto-fill,minmax(340px,1fr))',gap:16,marginBottom:24}}>
@@ -1946,6 +2167,18 @@ function App(){
                   </button>`}
                 </div>
                 ${filteredSocialCAs.map(ca=>html`<${SocialCaptionCard} key=${ca.id} ca=${ca} onUpdate=${handleSocialCAUpdate} />`)}
+              </div>`}
+              <!-- Drill of the Week Email section -->
+              ${filteredEmailCAs.length>0&&html`<div style=${{marginBottom:24}}>
+                <div style=${{marginBottom:12,display:'flex',alignItems:'center',gap:8}}>
+                  <span style=${{color:'#4a86f5',fontWeight:700,fontSize:10,textTransform:'uppercase',letterSpacing:'1.5px',whiteSpace:'nowrap'}}>📧 Drill of the Week — Email (${filteredEmailCAs.length})</span>
+                  <div style=${{flex:1,height:'0.5px',background:'#17304e'}}></div>
+                  ${filteredEmailCAs.filter(ca=>ca.status==='pending').length>0&&html`<button onClick=${handleBulkApproveEmail}
+                    style=${{background:'rgba(52,211,153,0.1)',color:C.ok,border:`0.5px solid ${C.ok}55`,borderRadius:6,padding:'4px 14px',fontSize:11,fontWeight:600,cursor:'pointer',whiteSpace:'nowrap'}}>
+                    ✓ Approve All (${filteredEmailCAs.filter(ca=>ca.status==='pending').length})
+                  </button>`}
+                </div>
+                ${filteredEmailCAs.map(ca=>html`<${EmailCard} key=${ca.id} ca=${ca} onUpdate=${handleEmailCAUpdate} />`)}
               </div>`}
               <!-- Copy queue section (only shown if items exist) -->
               ${filteredCopy.length>0&&html`<div>
