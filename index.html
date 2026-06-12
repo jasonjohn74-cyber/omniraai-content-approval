@@ -1646,7 +1646,7 @@ function resolveCtFilter(l1,l2){
 }
 const SCHED_CAMPAIGNS=[
   {k:'all',        l:'All Active Campaigns', color:'#4a86f5'},
-  {k:'email',      l:'TDOW Email',    icon:'📧', color:'#4a86f5'},
+  {k:'email',      l:'Email (all series)', icon:'📧', color:'#4a86f5'},
   {k:'social',     l:'TDOW Social',   icon:'📸', color:'#fb923c'},
   {k:'real_gains', l:'Real Gains',    icon:'🏓', color:'#2dd4bf'},
 ];
@@ -1668,7 +1668,7 @@ function ArchiveTab({archive,onPurge}){
     {k:'all',l:'All Campaigns',color:'#4a86f5'},
     {k:'real_gains',l:'🏓 Real Gains',color:'#2dd4bf'},
     {k:'social',l:'📸📘 TDOW Social',color:'#fb923c'},
-    {k:'email',l:'📧 TDOW Email',color:'#4a86f5'},
+    {k:'email',l:'📧 Email (all series)',color:'#4a86f5'},
   ];
   const campaignLabel=r=>r.campaign_name||CAMPAIGN_META[r.content_type]?.campaign||r.campaign_id||'Unknown Campaign';
   const campaignColor=r=>CAMPAIGN_META[r.content_type]?.color||'#5a8ab0';
@@ -1963,13 +1963,14 @@ function App(){
     await db.updateSocialCA(id,patch);
     setEmailCAs(prev=>prev.map(ca=>ca.id===id?{...ca,...patch}:ca));
   }
-  async function handleBulkApproveEmail(){
-    const pending=emailCAs.filter(ca=>ca.status==='pending');
+  async function handleBulkApproveEmail(list){
+    const pending=(list||emailCAs).filter(ca=>ca.status==='pending');
     if(!pending.length)return;
-    if(!confirm(`Approve all ${pending.length} pending emails? They will blast on their scheduled Tuesdays.`))return;
+    if(!confirm(`Approve ${pending.length} pending email${pending.length>1?'s':''}? They will blast at their scheduled send times.`))return;
     const now2=new Date().toISOString();
+    const ids=new Set(pending.map(ca=>ca.id));
     await Promise.all(pending.map(ca=>db.updateSocialCA(ca.id,{status:'approved',approved_at:now2})));
-    setEmailCAs(prev=>prev.map(ca=>ca.status==='pending'?{...ca,status:'approved',approved_at:now2}:ca));
+    setEmailCAs(prev=>prev.map(ca=>ids.has(ca.id)?{...ca,status:'approved',approved_at:now2}:ca));
   }
   async function handleBulkApproveSocial(){
     const pending=socialCAs.filter(ca=>ca.status==='pending');
@@ -2132,7 +2133,7 @@ function App(){
             {k:'all',        l:'All Campaigns',   color:'#4a86f5'},
             {k:'real_gains', l:'🏓 Real Gains',    color:'#2dd4bf'},
             {k:'social',     l:'📸📘 TDOW Social', color:'#fb923c'},
-            {k:'email',      l:'📧 TDOW Email',    color:'#4a86f5'},
+            {k:'email',      l:'📧 Email (all series)', color:'#4a86f5'},
           ].map(({k,l,color})=>{
             // Count respects the current status filter so number always matches visible items
             const mediaBase=k==='all'?mediaAssets:mediaAssets.filter(a=>assetCampaign(a)===k);
@@ -2209,18 +2210,25 @@ function App(){
                 </div>
                 ${filteredSocialCAs.map(ca=>html`<${SocialCaptionCard} key=${ca.id} ca=${ca} onUpdate=${handleSocialCAUpdate} />`)}
               </div>`}
-              <!-- Drill of the Week Email section -->
-              ${filteredEmailCAs.length>0&&html`<div style=${{marginBottom:24}}>
-                <div style=${{marginBottom:12,display:'flex',alignItems:'center',gap:8}}>
-                  <span style=${{color:'#4a86f5',fontWeight:700,fontSize:10,textTransform:'uppercase',letterSpacing:'1.5px',whiteSpace:'nowrap'}}>📧 Drill of the Week — Email (${filteredEmailCAs.length})</span>
-                  <div style=${{flex:1,height:'0.5px',background:'#17304e'}}></div>
-                  ${filteredEmailCAs.filter(ca=>ca.status==='pending').length>0&&html`<button onClick=${handleBulkApproveEmail}
-                    style=${{background:'rgba(52,211,153,0.1)',color:C.ok,border:`0.5px solid ${C.ok}55`,borderRadius:6,padding:'4px 14px',fontSize:11,fontWeight:600,cursor:'pointer',whiteSpace:'nowrap'}}>
-                    ✓ Approve All (${filteredEmailCAs.filter(ca=>ca.status==='pending').length})
-                  </button>`}
-                </div>
-                ${filteredEmailCAs.map(ca=>html`<${EmailCard} key=${ca.id} ca=${ca} onUpdate=${handleEmailCAUpdate} />`)}
-              </div>`}
+              <!-- Email sections — one per series (seriesName, TDOW by week_number, else subject) -->
+              ${filteredEmailCAs.length>0&&(()=>{
+                const groups={};
+                filteredEmailCAs.forEach(ca=>{
+                  const k=ca.full_content?.seriesName||(ca.week_number?'Drill of the Week':(ca.subject||'Untitled Email'));
+                  (groups[k]=groups[k]||[]).push(ca);
+                });
+                return Object.entries(groups).map(([series,cas])=>html`<div key=${series} style=${{marginBottom:24}}>
+                  <div style=${{marginBottom:12,display:'flex',alignItems:'center',gap:8}}>
+                    <span style=${{color:'#4a86f5',fontWeight:700,fontSize:10,textTransform:'uppercase',letterSpacing:'1.5px',whiteSpace:'nowrap'}}>📧 ${series} — Email (${cas.length})</span>
+                    <div style=${{flex:1,height:'0.5px',background:'#17304e'}}></div>
+                    ${cas.filter(ca=>ca.status==='pending').length>0&&html`<button onClick=${()=>handleBulkApproveEmail(cas)}
+                      style=${{background:'rgba(52,211,153,0.1)',color:C.ok,border:`0.5px solid ${C.ok}55`,borderRadius:6,padding:'4px 14px',fontSize:11,fontWeight:600,cursor:'pointer',whiteSpace:'nowrap'}}>
+                      ✓ Approve All (${cas.filter(ca=>ca.status==='pending').length})
+                    </button>`}
+                  </div>
+                  ${cas.map(ca=>html`<${EmailCard} key=${ca.id} ca=${ca} onUpdate=${handleEmailCAUpdate} />`)}
+                </div>`);
+              })()}
               <!-- Copy queue section (only shown if items exist) -->
               ${filteredCopy.length>0&&html`<div>
                 <div style=${{marginBottom:10,color:'#5a8ab0',fontWeight:700,fontSize:10,textTransform:'uppercase',letterSpacing:'1.5px',display:'flex',alignItems:'center',gap:8}}>
