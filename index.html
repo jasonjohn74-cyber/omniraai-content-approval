@@ -220,6 +220,9 @@ const fmtdt=d=>d?new Date(d).toLocaleString('en-MY',{day:'numeric',month:'short'
 const fmtDay=d=>d?new Date(d).toLocaleDateString('en-MY',{weekday:'short',day:'numeric',month:'short',year:'numeric',...MYT}):'—';
 const fmtShortGlobal=d=>d?new Date(d).toLocaleDateString('en-MY',{day:'numeric',month:'short',...MYT}):'—';
 const varLabel=i=>String.fromCharCode(65+i);
+// MYT (fixed UTC+8, no DST) ⇄ form-input parts. Mirrors App 2 composer so the schedule round-trips exactly.
+const toMYTParts=iso=>{if(!iso)return{date:'',time:'09:00'};const m=new Date(new Date(iso).getTime()+8*3600*1000);const s=m.toISOString();return{date:s.slice(0,10),time:s.slice(11,16)};};
+const fromMYTParts=(date,time)=>date?new Date(`${date}T${(time||'09:00')}:00+08:00`).toISOString():null;
 
 // ── SHARED UI ────────────────────────────────────────────────
 function Spinner({msg='Loading…'}){return html`<div style=${{display:'flex',alignItems:'center',justifyContent:'center',gap:10,padding:'80px 20px',color:C.dm,fontSize:13}}>
@@ -952,6 +955,9 @@ function SocialCaptionCard({ca,onUpdate,onDelete}){
   const[rejectMode,setRejectMode]=useState(false);
   const[rejectRemark,setRejectRemark]=useState('');
   const[draftSaved,setDraftSaved]=useState(!!(ca.full_content?.draft_saved));
+  const[schedDate,setSchedDate]=useState(()=>toMYTParts(ca.scheduled_for).date);
+  const[schedTime,setSchedTime]=useState(()=>toMYTParts(ca.scheduled_for).time);
+  function schedPatch(){const iso=fromMYTParts(schedDate,schedTime);return iso?{scheduled_for:iso}:{};}
 
   const drillName=(ca.subject||'').replace(/^TDOW Social Wk\d+:\s*/i,'');
   const caption=ca.full_content?.caption||ca.preview_text||'';
@@ -1009,7 +1015,7 @@ function SocialCaptionCard({ca,onUpdate,onDelete}){
     const fc={...ca.full_content,caption:copyText,draft_saved:true,
       igVideoUrl:newIgUrl||ca.full_content?.igVideoUrl||'',
       youtubeUrl:newYtUrl||ca.full_content?.youtubeUrl||ca.full_content?.youtube_url||''};
-    await onUpdate(ca.id,{full_content:fc,preview_text:copyText});
+    await onUpdate(ca.id,{full_content:fc,preview_text:copyText,...schedPatch()});
     setDraftSaved(true);setBusy(false);
   }
   async function doSaveAndApprove(){
@@ -1017,7 +1023,7 @@ function SocialCaptionCard({ca,onUpdate,onDelete}){
     const fc={...ca.full_content,caption:copyText,
       igVideoUrl:newIgUrl||ca.full_content?.igVideoUrl||'',
       youtubeUrl:newYtUrl||ca.full_content?.youtubeUrl||ca.full_content?.youtube_url||''};
-    await onUpdate(ca.id,{status:'approved',approved_at:new Date().toISOString(),full_content:fc,preview_text:copyText});
+    await onUpdate(ca.id,{status:'approved',approved_at:new Date().toISOString(),full_content:fc,preview_text:copyText,...schedPatch()});
     setBusy(false);
   }
   async function doConfirmReject(){
@@ -1104,6 +1110,16 @@ function SocialCaptionCard({ca,onUpdate,onDelete}){
                 placeholder="${yt||'No YouTube URL currently set'}"
                 style=${{background:C.s2,border:`1px solid ${C.bdB}`,borderRadius:6,padding:'7px 10px',fontSize:11,color:C.tx,width:'100%',outline:'none'}}/>
             </div>
+          </div>
+
+          <!-- ── SCHEDULE (MYT) ── -->
+          <div style=${{borderTop:`0.5px solid ${C.bd}`,paddingTop:14,marginTop:14}}>
+            <span style=${{fontSize:11,fontWeight:700,color:C.dm,letterSpacing:'0.4px',textTransform:'uppercase',display:'block',marginBottom:8}}>📅 Post Schedule (Malaysia time)</span>
+            <div style=${{display:'flex',gap:8,flexWrap:'wrap'}}>
+              <input type="date" value=${schedDate} onChange=${e=>setSchedDate(e.target.value)} style=${{background:C.s2,border:`1px solid ${C.bdB}`,borderRadius:6,padding:'7px 10px',fontSize:12,color:C.tx,outline:'none',flex:'1 1 160px'}}/>
+              <input type="time" value=${schedTime} onChange=${e=>setSchedTime(e.target.value)} style=${{background:C.s2,border:`1px solid ${C.bdB}`,borderRadius:6,padding:'7px 10px',fontSize:12,color:C.tx,outline:'none',flex:'0 1 130px'}}/>
+            </div>
+            <div style=${{color:C.mt,fontSize:10,marginTop:6}}>Saved with Save / Approve. Sets the schedule shown across Schedule &amp; Deployments tabs.</div>
           </div>
 
           <!-- ── BOTTOM ACTIONS ── -->
@@ -1204,6 +1220,9 @@ function EmailCard({ca,onUpdate,onDelete}){
   const[ctas,setCtas]=useState(()=>Array.isArray(ca.full_content?.ctaButtons)?ca.full_content.ctaButtons.map(c=>({label:c.label||'',url:c.url||'',desc:c.desc||''})):[]);
   const[footer,setFooter]=useState(ca.full_content?.footer||'');
   const[sendList,setSendList]=useState(ca.full_content?.sendListId||'titan_active');
+  // Editable schedule (MYT)
+  const[schedDate,setSchedDate]=useState(()=>toMYTParts(ca.scheduled_for).date);
+  const[schedTime,setSchedTime]=useState(()=>toMYTParts(ca.scheduled_for).time);
   // Resync when CA changes externally (refresh / AI save)
   useEffect(()=>{setSubj(ca.full_content?.emailSubject||ca.subject||'');setSubjVersion(v=>v+1);},[ca.full_content?.emailSubject,ca.subject]);
   useEffect(()=>{setBody(ca.full_content?.drillDescription||ca.full_content?.emailBody||'');setBodyVersion(v=>v+1);},[ca.full_content?.drillDescription,ca.full_content?.emailBody]);
@@ -1234,15 +1253,17 @@ function EmailCard({ca,onUpdate,onDelete}){
   const addCta=()=>setCtas(p=>[...p,{label:'',url:'',desc:''}]);
   const updCta=(i,f,v)=>setCtas(p=>p.map((c,j)=>j===i?{...c,[f]:v}:c));
   const rmCta=i=>setCtas(p=>p.filter((_,j)=>j!==i));
+  // Schedule patch (MYT→UTC) — only included when a date is set, so blank inputs never wipe scheduled_for
+  function schedPatch(){const iso=fromMYTParts(schedDate,schedTime);return iso?{scheduled_for:iso}:{};}
 
   async function doSaveDraft(){
     setBusy(true);
-    await onUpdate(ca.id,{full_content:buildFC({draft_saved:true}),subject:subj||ca.subject,preview_text:body});
+    await onUpdate(ca.id,{full_content:buildFC({draft_saved:true}),subject:subj||ca.subject,preview_text:body,...schedPatch()});
     setDraftSaved(true);flashMsg('✓ Saved as draft');setBusy(false);
   }
   async function doSaveApprove(){
     setBusy(true);
-    await onUpdate(ca.id,{status:'approved',approved_at:new Date().toISOString(),full_content:buildFC(),subject:subj||ca.subject,preview_text:body});
+    await onUpdate(ca.id,{status:'approved',approved_at:new Date().toISOString(),full_content:buildFC(),subject:subj||ca.subject,preview_text:body,...schedPatch()});
     setBusy(false);
   }
   async function doConfirmReject(){
@@ -1254,7 +1275,7 @@ function EmailCard({ca,onUpdate,onDelete}){
   async function doReopen(){setBusy(true);await onUpdate(ca.id,{status:'pending',approved_at:null});setBusy(false);}
   async function doSaveOnly(){
     setBusy(true);
-    await onUpdate(ca.id,{full_content:buildFC({draft_saved:true}),subject:subj||ca.subject,preview_text:body});
+    await onUpdate(ca.id,{full_content:buildFC({draft_saved:true}),subject:subj||ca.subject,preview_text:body,...schedPatch()});
     setDraftSaved(true);flashMsg('✓ Saved');setBusy(false);
   }
   async function doBlastNow(){
@@ -1433,6 +1454,16 @@ function EmailCard({ca,onUpdate,onDelete}){
               <option value="titan_active">Titan Active (Brevo list 3)</option>
               <option value="titan_b2b">Titan B2B (Brevo list 4)</option>
             </select>
+          </div>
+
+          <!-- SCHEDULE (MYT) -->
+          <div style=${{borderTop:`0.5px solid ${C.bd}`,paddingTop:14,marginTop:14}}>
+            <span style=${{fontSize:11,fontWeight:700,color:C.dm,letterSpacing:'0.4px',textTransform:'uppercase',display:'block',marginBottom:8}}>📅 Blast Schedule (Malaysia time)</span>
+            <div style=${{display:'flex',gap:8,flexWrap:'wrap'}}>
+              <input type="date" value=${schedDate} onChange=${e=>setSchedDate(e.target.value)} style=${{...inputStyle,fontSize:12,width:'auto',flex:'1 1 160px'}}/>
+              <input type="time" value=${schedTime} onChange=${e=>setSchedTime(e.target.value)} style=${{...inputStyle,fontSize:12,width:'auto',flex:'0 1 130px'}}/>
+            </div>
+            <div style=${{color:C.mt,fontSize:10,marginTop:6}}>The watchdog blasts this email once approved and this MYT time has passed. Saved with any Save / Approve action.</div>
           </div>
           `:''}
 
