@@ -1199,6 +1199,11 @@ function EmailCard({ca,onUpdate,onDelete}){
   const[testResult,setTestResult]=useState(null);
   const[previewing,setPreviewing]=useState(false);
   const[previewDoc,setPreviewDoc]=useState(null);
+  // Composer-only editable fields (full App 2 parity) — banner, CTA buttons, footer, send list
+  const[banner,setBanner]=useState(ca.full_content?.bannerImage||'');
+  const[ctas,setCtas]=useState(()=>Array.isArray(ca.full_content?.ctaButtons)?ca.full_content.ctaButtons.map(c=>({label:c.label||'',url:c.url||'',desc:c.desc||''})):[]);
+  const[footer,setFooter]=useState(ca.full_content?.footer||'');
+  const[sendList,setSendList]=useState(ca.full_content?.sendListId||'titan_active');
   // Resync when CA changes externally (refresh / AI save)
   useEffect(()=>{setSubj(ca.full_content?.emailSubject||ca.subject||'');setSubjVersion(v=>v+1);},[ca.full_content?.emailSubject,ca.subject]);
   useEffect(()=>{setBody(ca.full_content?.drillDescription||ca.full_content?.emailBody||'');setBodyVersion(v=>v+1);},[ca.full_content?.drillDescription,ca.full_content?.emailBody]);
@@ -1214,8 +1219,21 @@ function EmailCard({ca,onUpdate,onDelete}){
   const st=CA_STATUS_MAP[ca.status]||{l:ca.status,c:C.dm,icon:''};
 
   function flashMsg(msg){setSaveMsg(msg);setTimeout(()=>setSaveMsg(''),3000);}
-  // Dual-write body to BOTH fields — broadcast sender reads emailBody first, drip reads drillDescription (single source of truth)
-  function buildFC(extra={}){return {...ca.full_content,emailSubject:subj,drillDescription:body,emailBody:body,youtubeUrl:newYt,driveVideoUrl:newDrive,...extra};}
+  // Dual-write body to BOTH fields — broadcast sender reads emailBody first, drip reads drillDescription (single source of truth).
+  // Composer emails also persist banner/CTAs/footer/sendList (full App 2 parity); TDOW drip ignores these (fixed template).
+  function buildFC(extra={}){
+    const base={...ca.full_content,emailSubject:subj,drillDescription:body,emailBody:body,youtubeUrl:newYt,driveVideoUrl:newDrive};
+    if(isComposer){
+      base.bannerImage=banner;
+      base.ctaButtons=ctas.filter(c=>c.label&&c.url).map(c=>({label:c.label,url:c.url,desc:c.desc||''}));
+      base.footer=footer;
+      base.sendListId=sendList;
+    }
+    return {...base,...extra};
+  }
+  const addCta=()=>setCtas(p=>[...p,{label:'',url:'',desc:''}]);
+  const updCta=(i,f,v)=>setCtas(p=>p.map((c,j)=>j===i?{...c,[f]:v}:c));
+  const rmCta=i=>setCtas(p=>p.filter((_,j)=>j!==i));
 
   async function doSaveDraft(){
     setBusy(true);
@@ -1376,6 +1394,47 @@ function EmailCard({ca,onUpdate,onDelete}){
               <input value=${newDrive} onInput=${e=>setNewDrive(e.target.value)} placeholder="${drive||'No Drive/video URL set'}" style=${{...inputStyle,fontSize:11}}/>
             </div>
           </div>
+
+          ${isComposer?html`
+          <!-- BANNER -->
+          <div style=${{borderTop:`0.5px solid ${C.bd}`,paddingTop:14,marginTop:14}}>
+            <span style=${{fontSize:11,fontWeight:700,color:C.dm,letterSpacing:'0.4px',textTransform:'uppercase',display:'block',marginBottom:8}}>🖼 Banner Image URL</span>
+            <input value=${banner} onInput=${e=>setBanner(e.target.value)} placeholder="https://… header image at top of email (optional)" style=${{...inputStyle,fontSize:11}}/>
+            ${banner&&html`<div style=${{marginTop:8,borderRadius:6,overflow:'hidden',border:`0.5px solid ${C.bd}`,maxHeight:120}}><img src=${banner} style=${{width:'100%',objectFit:'cover',display:'block'}} onError=${e=>e.target.style.display='none'}/></div>`}
+          </div>
+
+          <!-- CTA BUTTONS -->
+          <div style=${{borderTop:`0.5px solid ${C.bd}`,paddingTop:14,marginTop:14}}>
+            <div style=${{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:10}}>
+              <span style=${{fontSize:11,fontWeight:700,color:C.dm,letterSpacing:'0.4px',textTransform:'uppercase'}}>🔘 Call-to-Action Buttons</span>
+              <button onClick=${addCta} style=${{background:`${C.ac}14`,color:C.ac,border:`0.5px solid ${C.ac}45`,borderRadius:6,padding:'4px 12px',fontSize:11,fontWeight:600,cursor:'pointer'}}>+ Add button</button>
+            </div>
+            ${ctas.length===0?html`<div style=${{fontSize:11,color:C.mt,marginBottom:4}}>No buttons. Add one for a clickable CTA in the email.</div>`:''}
+            ${ctas.map((c,i)=>html`<div key=${i} style=${{border:`0.5px solid ${C.bd}`,borderRadius:8,padding:10,marginBottom:8}}>
+              <div style=${{display:'grid',gridTemplateColumns:'1fr 1.5fr auto',gap:8,alignItems:'center',marginBottom:8}}>
+                <input value=${c.label} onInput=${e=>updCta(i,'label',e.target.value)} placeholder="Button label e.g. Book Now" style=${{...inputStyle,fontSize:11}}/>
+                <input value=${c.url} onInput=${e=>updCta(i,'url',e.target.value)} placeholder="https://… link" style=${{...inputStyle,fontSize:11}}/>
+                <button onClick=${()=>rmCta(i)} title="Remove button" style=${{background:'none',border:'none',color:C.er,cursor:'pointer',fontSize:18,lineHeight:1}}>×</button>
+              </div>
+              <input value=${c.desc} onInput=${e=>updCta(i,'desc',e.target.value)} placeholder="Optional guide text shown above this button" style=${{...inputStyle,fontSize:11}}/>
+            </div>`)}
+          </div>
+
+          <!-- FOOTER -->
+          <div style=${{borderTop:`0.5px solid ${C.bd}`,paddingTop:14,marginTop:14}}>
+            <span style=${{fontSize:11,fontWeight:700,color:C.dm,letterSpacing:'0.4px',textTransform:'uppercase',display:'block',marginBottom:8}}>📄 Footer / Sign-off</span>
+            <textarea value=${footer} onInput=${e=>setFooter(e.target.value)} placeholder="Sign-off, contact links, why they're receiving this…" style=${{...inputStyle,fontSize:11,lineHeight:1.6,resize:'vertical',minHeight:70}}/>
+          </div>
+
+          <!-- SEND LIST -->
+          <div style=${{borderTop:`0.5px solid ${C.bd}`,paddingTop:14,marginTop:14}}>
+            <span style=${{fontSize:11,fontWeight:700,color:C.dm,letterSpacing:'0.4px',textTransform:'uppercase',display:'block',marginBottom:8}}>📋 Send List</span>
+            <select value=${sendList} onChange=${e=>setSendList(e.target.value)} style=${{...inputStyle,fontSize:12}}>
+              <option value="titan_active">Titan Active (Brevo list 3)</option>
+              <option value="titan_b2b">Titan B2B (Brevo list 4)</option>
+            </select>
+          </div>
+          `:''}
 
           ${testSendBox}
 
