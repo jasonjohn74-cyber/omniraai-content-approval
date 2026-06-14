@@ -1358,7 +1358,7 @@ function EmailCard({ca,onUpdate,onDelete}){
       <div style=${{flex:1,minWidth:0}}>
         <div style=${{display:'flex',alignItems:'center',gap:7,flexWrap:'wrap',marginBottom:4}}>
           <span style=${{background:'rgba(74,134,245,0.15)',color:'#4a86f5',border:'0.5px solid rgba(74,134,245,0.35)',borderRadius:10,padding:'2px 9px',fontSize:10,fontWeight:700}}>📧 ${seriesLabel} · Email</span>
-          ${ca.week_number?html`<span style=${{color:C.ac,fontWeight:800,fontSize:12}}>Wk ${ca.week_number}</span>`:''}
+          ${ca.week_number?html`<span style=${{color:C.ac,fontWeight:800,fontSize:12}}>Drill ${ca.week_number}</span>`:''}
           <span style=${{color:C.tx,fontWeight:600,fontSize:14}}>${pieceTitle}</span>
         </div>
         <div style=${{color:C.mt,fontSize:11}}>📅 ${fmtDay(ca.scheduled_for)} · Brevo email blast</div>
