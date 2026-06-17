@@ -2162,6 +2162,8 @@ function App(){
   // Combined counts for Content tab
   const contentCounts={all:copyItems.length+mediaAssets.length+socialCAs.length+emailCAs.length};
   Object.keys(STATUS).forEach(s=>{contentCounts[s]=(copyCounts[s]||0)+(mediaCounts[s]||0)+(soCACounts[s]||0)+(emCACounts[s]||0);});
+  // Scheduled = approved content that has a scheduled_for (queued to go out)
+  contentCounts['scheduled']=[...socialCAs,...emailCAs].filter(c=>c.status==='approved'&&c.scheduled_for).length+mediaAssets.filter(a=>a.status==='approved'&&rgSchedule[a.id]&&rgSchedule[a.id].scheduled_for).length;
 
   // Campaign detector for media assets
   const assetCampaign=asset=>{
@@ -2202,12 +2204,41 @@ function App(){
   const counts=contentCounts;
   const statusTabs=[
     {k:'all',l:'All'},{k:'pending_review',l:'Pending'},{k:'revision_requested',l:'Revision Needed'},
-    {k:'approved',l:'Approved'},{k:'rejected',l:'Rejected'},{k:'published',l:'Published'},
+    {k:'approved',l:'Approved'},{k:'rejected',l:'Rejected'},{k:'scheduled',l:'Scheduled'},{k:'published',l:'Published'},
   ];
 
   const pendingContent=(contentCounts['pending_review']||0);
   const showFilters=activeTab==='content';
   const pendingArchiveCleanup=mediaAssets.filter(a=>a.status==='published'||a.status==='rejected').length;
+
+  // ── Scheduled view: unified table of what's queued to go out (approved + scheduled_for), earliest → latest ──
+  const fmtSched=d=>d?new Date(d).toLocaleString('en-MY',{day:'numeric',month:'short',year:'numeric',hour:'2-digit',minute:'2-digit',timeZone:'Asia/Kuala_Lumpur'}):'—';
+  const fmtDay=d=>d?new Date(d).toLocaleDateString('en-MY',{weekday:'short',timeZone:'Asia/Kuala_Lumpur'}):'';
+  const scheduledRows=[
+    ...socialCAs.filter(c=>c.status==='approved'&&c.scheduled_for).map(c=>({id:c.id,date:c.scheduled_for,ck:'social',campaign:'TDOW Social',title:c.subject||'Social post',platform:'📸 IG · 📘 FB',clientId:null})),
+    ...emailCAs.filter(c=>c.status==='approved'&&c.scheduled_for).map(c=>({id:c.id,date:c.scheduled_for,ck:'email',campaign:c.full_content?.seriesName||(c.week_number?'TDOW Email':'Email'),title:c.subject||'Email',platform:'📧 Email',clientId:null})),
+    ...mediaAssets.filter(a=>a.status==='approved'&&rgSchedule[a.id]&&rgSchedule[a.id].scheduled_for).map(a=>({id:a.id,date:rgSchedule[a.id].scheduled_for,ck:'real_gains',campaign:'Real Gains',title:a.asset_name||a.campaign_name||'Real Gains post',platform:'📸 IG · 📘 FB',clientId:a.client_id})),
+  ].filter(r=>(filterCampaign==='all'||r.ck===filterCampaign)&&(filterClient==='all'||!r.clientId||r.clientId===filterClient))
+   .sort((a,b)=>new Date(a.date)-new Date(b.date));
+  const scheduledTableHtml=html`<div>
+    <div style=${{display:'flex',alignItems:'center',gap:8,marginBottom:12}}>
+      <span style=${{color:'#4a86f5',fontWeight:700,fontSize:10,textTransform:'uppercase',letterSpacing:'1.5px'}}>📅 Scheduled — earliest to latest (${scheduledRows.length})</span>
+      <div style=${{flex:1,height:'0.5px',background:'#17304e'}}></div>
+    </div>
+    ${scheduledRows.length===0?html`<div style=${{textAlign:'center',padding:'60px 20px',color:C.mt}}><div style=${{fontSize:28,marginBottom:10}}>📭</div><div style=${{fontSize:13}}>Nothing scheduled for the current filters.</div></div>`
+    :html`<div style=${{background:C.s1,border:`0.5px solid ${C.bd}`,borderRadius:10,overflow:'hidden'}}>
+      <div style=${{display:'grid',gridTemplateColumns:'160px 56px 120px 1fr 110px',padding:'9px 14px',borderBottom:`0.5px solid ${C.bd}`,fontSize:10,color:C.dm,textTransform:'uppercase',letterSpacing:'0.5px',fontWeight:700}}>
+        <div>📅 Date (MYT)</div><div>Day</div><div>Campaign</div><div>Title</div><div>Platform</div>
+      </div>
+      ${scheduledRows.map((r,i)=>html`<div key=${r.id} style=${{display:'grid',gridTemplateColumns:'160px 56px 120px 1fr 110px',padding:'10px 14px',borderBottom:i<scheduledRows.length-1?`0.5px solid ${C.bd}55`:'none',fontSize:12,alignItems:'center',background:i%2?'rgba(14,24,48,0.3)':'transparent'}}>
+        <div style=${{color:C.tx}}>${fmtSched(r.date)}</div>
+        <div style=${{color:fmtDay(r.date)==='Tue'?'#4a86f5':fmtDay(r.date)==='Wed'?'#fb923c':fmtDay(r.date)==='Fri'?'#34d399':C.dm,fontWeight:600}}>${fmtDay(r.date)}</div>
+        <div style=${{color:C.dm}}>${r.campaign}</div>
+        <div style=${{color:C.tx,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap',paddingRight:8}}>${r.title}</div>
+        <div style=${{color:C.dm,fontSize:11}}>${r.platform}</div>
+      </div>`)}
+    </div>`}
+  </div>`;
 
   return html`<div style=${{minHeight:'100vh',background:C.bg}}>
 
@@ -2313,6 +2344,8 @@ function App(){
           ?html`<${DeploymentTab} deployments=${deployments} clients=${clients} />`
           :activeTab==='schedule'
           ?html`<${ScheduleTab} schedule=${schedule} clients=${clients} schedClientMap=${schedClientMap} />`
+          :(activeTab==='content'&&filterStatus==='scheduled')
+          ?scheduledTableHtml
           :/* activeTab === 'content' */
             html`<div>
               ${pendingArchiveCleanup>0&&html`<div style=${{background:'rgba(45,212,191,0.07)',border:'0.5px solid rgba(45,212,191,0.25)',borderRadius:8,padding:'10px 16px',marginBottom:16,display:'flex',alignItems:'center',gap:12}}>
