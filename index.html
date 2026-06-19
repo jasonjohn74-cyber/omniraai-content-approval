@@ -2221,6 +2221,9 @@ function App(){
     ...socialCAs.filter(c=>c.status==='approved'&&!validateForFire(c).ok).map(c=>({id:c.id,kind:'social',label:'📸 TDOW Social',title:c.subject||('Wk'+c.week_number),when:c.scheduled_for,v:validateForFire(c)})),
     ...emailCAs.filter(c=>c.status==='approved'&&!validateForFire(c).ok).map(c=>({id:c.id,kind:'email',label:'📧 Email',title:c.subject||('Wk'+c.week_number),when:c.scheduled_for,v:validateForFire(c)})),
     ...mediaAssets.filter(a=>a.status==='approved'&&rgSchedule[a.id]&&!rgSchedule[a.id].fireValid).map(a=>({id:a.id,kind:'real_gains',label:'🏓 Real Gains',title:a.asset_name||a.campaign_name||('Wk'+(rgSchedule[a.id]?.week_number||'')),when:rgSchedule[a.id]?.scheduled_for,v:{ok:false,hard:(rgSchedule[a.id]?.fireReasons||[]).map(r=>({reason:r,cls:/copy|caption|image|subject/i.test(r)?'human':'system'})),reasons:rgSchedule[a.id]?.fireReasons||[]}})),
+    // Items mid-publish that didn't confirm = the send FAILED — never shown as Published; surfaced here to fix/retry.
+    ...[...socialCAs,...emailCAs].filter(c=>c.status==='publishing').map(c=>({id:c.id,kind:c.content_type,label:c.content_type==='email'?'📧 Email':'📸 TDOW Social',title:c.subject||('Wk'+c.week_number),when:c.scheduled_for,v:{ok:false,hard:[{reason:'publish didn’t complete — the send failed. Re-open & re-approve to retry.',cls:'system'}],reasons:['publish failed']}})),
+    ...mediaAssets.filter(a=>rgSchedule[a.id]&&rgSchedule[a.id].ca_status==='publishing').map(a=>({id:a.id,kind:'real_gains',label:'🏓 Real Gains',title:a.asset_name||('Wk'+(rgSchedule[a.id]?.week_number||'')),when:rgSchedule[a.id]?.scheduled_for,v:{ok:false,hard:[{reason:'publish didn’t complete — the post failed. Re-open & re-approve to retry.',cls:'system'}],reasons:['publish failed']}})),
   ];
   contentCounts['flagged']=flaggedList.length;
 
@@ -2238,18 +2241,18 @@ function App(){
   });
   const filteredSocialCAs=socialCAs.filter(ca=>{
     if(filterCampaign!=='all'&&filterCampaign!=='social')return false;
-    if(filterStatus==='flagged')return ca.status==='approved'&&!validateForFire(ca).ok;
+    if(filterStatus==='flagged')return ca.status==='publishing'||(ca.status==='approved'&&!validateForFire(ca).ok);
     if(filterStatus!=='all'&&CA_TO_STATUS[ca.status]!==filterStatus)return false;
     return true;
   });
   const filteredEmailCAs=emailCAs.filter(ca=>{
     if(filterCampaign!=='all'&&filterCampaign!=='email')return false;
-    if(filterStatus==='flagged')return ca.status==='approved'&&!validateForFire(ca).ok;
+    if(filterStatus==='flagged')return ca.status==='publishing'||(ca.status==='approved'&&!validateForFire(ca).ok);
     if(filterStatus!=='all'&&CA_TO_STATUS[ca.status]!==filterStatus)return false;
     return true;
   });
   const filteredMedia=mediaAssets.filter(asset=>{
-    if(filterStatus==='flagged'){ if(!(asset.status==='approved'&&rgSchedule[asset.id]&&!rgSchedule[asset.id].fireValid))return false; }
+    if(filterStatus==='flagged'){ const rg=rgSchedule[asset.id]; if(!((rg&&rg.ca_status==='publishing')||(asset.status==='approved'&&rg&&!rg.fireValid)))return false; }
     else if(filterStatus!=='all'&&asset.status!==filterStatus)return false;
     if(filterClient!=='all'&&asset.client_id!==filterClient)return false;
     if(filterCampaign!=='all'&&assetCampaign(asset)!==filterCampaign)return false;
