@@ -395,10 +395,11 @@ function MediaAssetCard({asset,onUpdate,onArchive,onDelete,weekInfo}){
     await onUpdate({...asset,status:'published',published_at:now()});
   }
   async function doPostNow(){
-    if(!weekInfo?.week_number)return;
+    if(!weekInfo?.week_number||!weekInfo?.ca_id)return;
+    if(weekInfo.fireValid===false){alert("⚠️ This post has an issue and can't be blasted — resolve it in the Flagged Issue folder first.");return;}
     if(!confirm(`Post Real Gains Wk${weekInfo.week_number} "${asset.asset_name||'this post'}" to IG + FB right now?`))return;
     setPosting(true);setPostResult(null);
-    fetch(`${N8N}/webhook/real-gains-run`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({weekOverride:weekInfo.week_number,source:'app4_media_card'})}).catch(()=>{});
+    fetch(`${N8N}/webhook/real-gains-run`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ca_id:weekInfo.ca_id,source:'app4_media_card'})}).catch(()=>{});
     setPostResult({ok:true,msg:'Triggered — Telegram will confirm once posted (allow ~3 min for IG processing)'});
     setPosting(false);
   }
@@ -999,9 +1000,10 @@ function SocialCaptionCard({ca,onUpdate,onDelete}){
 
   async function doReopen(){setBusy(true);await onUpdate(ca.id,{status:'pending',approved_at:null});setBusy(false);}
   async function doPostNow(){
+    if(!validateForFire({...ca,content_type:'social'}).ok){alert("⚠️ This post has an issue and can't be posted — resolve it in the Flagged Issue folder first.");return;}
     if(!confirm(`Post Wk${ca.week_number} "${drillName}" to IG + FB right now?`))return;
     setPosting(true);setPostResult(null);
-    fetch(`${N8N}/webhook/social-sync-run`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({weekOverride:ca.week_number,source:'app4_manual'})}).catch(()=>{});
+    fetch(`${N8N}/webhook/social-sync-run`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ca_id:ca.id,source:'app4_manual'})}).catch(()=>{});
     setPostResult({ok:true,msg:'Triggered — Telegram will confirm once posted (allow ~3 min for IG Reel processing)'});
     setPosting(false);
   }
@@ -1314,11 +1316,12 @@ function EmailCard({ca,onUpdate,onDelete}){
     setDraftSaved(true);flashMsg('✓ Saved');setBusy(false);
   }
   async function doBlastNow(){
+    if(!validateForFire({...ca,content_type:'email'}).ok){alert("⚠️ This email has an issue and can't be blasted — resolve it in the Flagged Issue folder first.");return;}
     if(!confirm(`Blast "${subj||pieceTitle}" via Brevo to the live email list right now?`))return;
     setBlasting(true);setBlastResult(null);
-    // Composer/standalone emails → generic broadcast sender (by ca_id). TDOW drip emails → drip webhook (by week).
+    // Both composer + TDOW emails fire the SPECIFIC record by ca_id (atomic claim → no duplicate).
     const url=isComposer?`${N8N}/webhook/email-broadcast-run`:`${N8N}/webhook/email-blast-run`;
-    const payload=isComposer?{ca_id:ca.id,source:'app4_manual'}:{weekOverride:ca.week_number,source:'app4_manual'};
+    const payload={ca_id:ca.id,source:'app4_manual'};
     fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)}).catch(()=>{});
     setBlastResult({ok:true,msg:'Triggered — Telegram will confirm once the Brevo blast completes.'});
     setBlasting(false);
@@ -1909,9 +1912,10 @@ function ScheduleTab({schedule,clients,schedClientMap}){
     const wh=FIRE_HOOKS[item.content_type];
     if(!wh){alert('No webhook configured for this content type.');return;}
     const label={'email':'Email Blast','social':'Social Post','real_gains':'Real Gains Post'}[item.content_type]||item.content_type;
+    if(!validateForFire(item).ok){alert("⚠️ This item has an issue and can't fire — resolve it in the Flagged Issue folder first.");return;}
     if(!confirm(`Fire ${label} Wk${item.week_number} now? It will post to the live platforms immediately.`))return;
     setFiringRows(p=>({...p,[item.id]:true}));
-    fetch(`${N8N}/webhook/${wh}`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({weekOverride:item.week_number,source:'app4_schedule'})}).catch(()=>{});
+    fetch(`${N8N}/webhook/${wh}`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ca_id:item.id,source:'app4_schedule'})}).catch(()=>{});
     setFireResults(p=>({...p,[item.id]:{ok:true}}));
     setFiringRows(p=>({...p,[item.id]:false}));
   }
