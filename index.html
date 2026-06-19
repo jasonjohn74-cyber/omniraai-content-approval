@@ -155,11 +155,11 @@ const db={
     catch{return[];}
   },
   async getSocialCAs(){
-    try{const r=await fetch(`${SB_URL}/rest/v1/content_approvals?content_type=eq.social&select=id,week_number,subject,status,scheduled_for,approved_at,full_content,preview_text&order=week_number.asc`,{headers:SBH});const d=await r.json();return Array.isArray(d)?d:[];}
+    try{const r=await fetch(`${SB_URL}/rest/v1/content_approvals?content_type=eq.social&select=id,content_type,week_number,subject,status,scheduled_for,approved_at,full_content,preview_text&order=week_number.asc`,{headers:SBH});const d=await r.json();return Array.isArray(d)?d:[];}
     catch{return[];}
   },
   async getEmailCAs(){
-    try{const r=await fetch(`${SB_URL}/rest/v1/content_approvals?content_type=eq.email&select=id,week_number,subject,status,scheduled_for,approved_at,full_content,preview_text&order=scheduled_for.asc`,{headers:SBH});const d=await r.json();return Array.isArray(d)?d:[];}
+    try{const r=await fetch(`${SB_URL}/rest/v1/content_approvals?content_type=eq.email&select=id,content_type,week_number,subject,status,scheduled_for,approved_at,full_content,preview_text&order=scheduled_for.asc`,{headers:SBH});const d=await r.json();return Array.isArray(d)?d:[];}
     catch{return[];}
   },
   // Generic CA patch (used by both social + email cards) — content_approvals is the single source of truth
@@ -2094,7 +2094,7 @@ function App(){
     const rgMap={};
     sched.filter(s=>s.content_type==='real_gains').forEach(s=>{
       if(s.full_content?.asset_id){
-        rgMap[s.full_content.asset_id]={week_number:s.week_number,scheduled_for:s.scheduled_for,ca_status:s.status,ca_id:s.id,post_caption:s.full_content?.post_caption||null,fireValid:validateForFire(s).ok};
+        const _rv=validateForFire(s); rgMap[s.full_content.asset_id]={week_number:s.week_number,scheduled_for:s.scheduled_for,ca_status:s.status,ca_id:s.id,post_caption:s.full_content?.post_caption||null,fireValid:_rv.ok,fireReasons:_rv.reasons};
       }
     });
     setRgSchedule(rgMap);
@@ -2210,8 +2210,15 @@ function App(){
   // Combined counts for Content tab
   const contentCounts={all:copyItems.length+mediaAssets.length+socialCAs.length+emailCAs.length};
   Object.keys(STATUS).forEach(s=>{contentCounts[s]=(copyCounts[s]||0)+(mediaCounts[s]||0)+(soCACounts[s]||0)+(emCACounts[s]||0);});
-  // Scheduled = approved content that has a scheduled_for (queued to go out)
+  // Scheduled = approved content that has a scheduled_for (queued to go out) AND passes the integrity check
   contentCounts['scheduled']=[...socialCAs,...emailCAs].filter(c=>c.status==='approved'&&c.scheduled_for&&validateForFire(c).ok).length+mediaAssets.filter(a=>a.status==='approved'&&rgSchedule[a.id]&&rgSchedule[a.id].scheduled_for&&rgSchedule[a.id].fireValid).length;
+  // Flagged Issue = approved but FAILS the integrity check — held out of Schedule until resolved (🛠 system self-heals · ⚠️ needs you)
+  const flaggedList=[
+    ...socialCAs.filter(c=>c.status==='approved'&&!validateForFire(c).ok).map(c=>({id:c.id,kind:'social',label:'📸 TDOW Social',title:c.subject||('Wk'+c.week_number),when:c.scheduled_for,v:validateForFire(c)})),
+    ...emailCAs.filter(c=>c.status==='approved'&&!validateForFire(c).ok).map(c=>({id:c.id,kind:'email',label:'📧 Email',title:c.subject||('Wk'+c.week_number),when:c.scheduled_for,v:validateForFire(c)})),
+    ...mediaAssets.filter(a=>a.status==='approved'&&rgSchedule[a.id]&&!rgSchedule[a.id].fireValid).map(a=>({id:a.id,kind:'real_gains',label:'🏓 Real Gains',title:a.asset_name||a.campaign_name||('Wk'+(rgSchedule[a.id]?.week_number||'')),when:rgSchedule[a.id]?.scheduled_for,v:{ok:false,hard:(rgSchedule[a.id]?.fireReasons||[]).map(r=>({reason:r,cls:/copy|caption|image|subject/i.test(r)?'human':'system'})),reasons:rgSchedule[a.id]?.fireReasons||[]}})),
+  ];
+  contentCounts['flagged']=flaggedList.length;
 
   // Campaign detector for media assets
   const assetCampaign=asset=>{
@@ -2227,16 +2234,19 @@ function App(){
   });
   const filteredSocialCAs=socialCAs.filter(ca=>{
     if(filterCampaign!=='all'&&filterCampaign!=='social')return false;
+    if(filterStatus==='flagged')return ca.status==='approved'&&!validateForFire(ca).ok;
     if(filterStatus!=='all'&&CA_TO_STATUS[ca.status]!==filterStatus)return false;
     return true;
   });
   const filteredEmailCAs=emailCAs.filter(ca=>{
     if(filterCampaign!=='all'&&filterCampaign!=='email')return false;
+    if(filterStatus==='flagged')return ca.status==='approved'&&!validateForFire(ca).ok;
     if(filterStatus!=='all'&&CA_TO_STATUS[ca.status]!==filterStatus)return false;
     return true;
   });
   const filteredMedia=mediaAssets.filter(asset=>{
-    if(filterStatus!=='all'&&asset.status!==filterStatus)return false;
+    if(filterStatus==='flagged'){ if(!(asset.status==='approved'&&rgSchedule[asset.id]&&!rgSchedule[asset.id].fireValid))return false; }
+    else if(filterStatus!=='all'&&asset.status!==filterStatus)return false;
     if(filterClient!=='all'&&asset.client_id!==filterClient)return false;
     if(filterCampaign!=='all'&&assetCampaign(asset)!==filterCampaign)return false;
     return true;
@@ -2252,7 +2262,7 @@ function App(){
   const counts=contentCounts;
   const statusTabs=[
     {k:'all',l:'All'},{k:'pending_review',l:'Pending'},{k:'revision_requested',l:'Revision Needed'},
-    {k:'approved',l:'Approved'},{k:'rejected',l:'Rejected'},{k:'scheduled',l:'Scheduled'},{k:'published',l:'Published'},
+    {k:'approved',l:'Approved'},{k:'flagged',l:'⚠️ Flagged Issue'},{k:'rejected',l:'Rejected'},{k:'scheduled',l:'Scheduled'},{k:'published',l:'Published'},
   ];
 
   const pendingContent=(contentCounts['pending_review']||0);
@@ -2396,6 +2406,22 @@ function App(){
           ?scheduledTableHtml
           :/* activeTab === 'content' */
             html`<div>
+              ${contentCounts['flagged']>0&&html`<div style=${{background:'rgba(248,113,113,0.08)',border:'0.5px solid rgba(248,113,113,0.4)',borderRadius:8,padding:'12px 16px',marginBottom:16,display:'flex',alignItems:'center',gap:12}}>
+                <span style=${{fontSize:16}}>⚠️</span>
+                <span style=${{color:'#fca5a5',fontSize:13,flex:1}}><b>${contentCounts['flagged']} approved item${contentCounts['flagged']!==1?'s':''} won't fire</b> — held OUT of Schedule until resolved. 🛠 system issues self-heal · ⚠️ others need you.</span>
+                ${filterStatus!=='flagged'&&html`<button onClick=${()=>setFilterStatus('flagged')} style=${{background:'rgba(248,113,113,0.15)',color:'#fca5a5',border:'0.5px solid rgba(248,113,113,0.5)',borderRadius:6,padding:'5px 14px',fontSize:12,fontWeight:700,cursor:'pointer',whiteSpace:'nowrap'}}>View Flagged Issues</button>`}
+              </div>`}
+              ${filterStatus==='flagged'&&flaggedList.length>0&&html`<div style=${{marginBottom:18}}>
+                ${flaggedList.map(f=>html`<div key=${'fl'+f.id} style=${{background:C.s1,border:'0.5px solid rgba(248,113,113,0.3)',borderRadius:8,padding:'11px 14px',marginBottom:8}}>
+                  <div style=${{display:'flex',gap:8,alignItems:'center',flexWrap:'wrap',marginBottom:6}}>
+                    <span style=${{color:'#fca5a5',fontWeight:700,fontSize:12}}>${f.label}</span>
+                    <span style=${{color:C.tx,fontSize:13,flex:1}}>${(f.title||'').slice(0,70)}</span>
+                    <span style=${{color:C.mt,fontSize:11}}>${f.when?fmtDay(f.when):''}</span>
+                  </div>
+                  ${(f.v.hard||[]).map((h,hi)=>html`<div key=${hi} style=${{fontSize:11,color:h.cls==='system'?'#7dd3fc':'#fbbf24'}}>${h.cls==='system'?'🛠 auto-fixing (system): ':'⚠️ needs you: '}${h.reason}</div>`)}
+                </div>`)}
+                <div style=${{color:C.mt,fontSize:11,marginTop:6}}>Fix the ⚠️ items below (open the card to edit). Once resolved they move into Schedule automatically.</div>
+              </div>`}
               ${pendingArchiveCleanup>0&&html`<div style=${{background:'rgba(45,212,191,0.07)',border:'0.5px solid rgba(45,212,191,0.25)',borderRadius:8,padding:'10px 16px',marginBottom:16,display:'flex',alignItems:'center',gap:12}}>
                 <span style=${{fontSize:13}}>📦</span>
                 <span style=${{color:'#5a8ab0',fontSize:12,flex:1}}>${pendingArchiveCleanup} asset${pendingArchiveCleanup!==1?'s':''} published or rejected — open them to archive or delete and free up space.</span>
