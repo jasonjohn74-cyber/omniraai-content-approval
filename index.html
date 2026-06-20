@@ -155,11 +155,11 @@ const db={
     catch{return[];}
   },
   async getSocialCAs(){
-    try{const r=await fetch(`${SB_URL}/rest/v1/content_approvals?content_type=eq.social&select=id,content_type,week_number,subject,status,scheduled_for,approved_at,full_content,preview_text&order=week_number.asc`,{headers:SBH});const d=await r.json();return Array.isArray(d)?d:[];}
+    try{const r=await fetch(`${SB_URL}/rest/v1/content_approvals?content_type=eq.social&select=id,content_type,week_number,subject,status,scheduled_for,approved_at,updated_at,full_content,preview_text&order=week_number.asc`,{headers:SBH});const d=await r.json();return Array.isArray(d)?d:[];}
     catch{return[];}
   },
   async getEmailCAs(){
-    try{const r=await fetch(`${SB_URL}/rest/v1/content_approvals?content_type=eq.email&select=id,content_type,week_number,subject,status,scheduled_for,approved_at,full_content,preview_text&order=scheduled_for.asc`,{headers:SBH});const d=await r.json();return Array.isArray(d)?d:[];}
+    try{const r=await fetch(`${SB_URL}/rest/v1/content_approvals?content_type=eq.email&select=id,content_type,week_number,subject,status,scheduled_for,approved_at,updated_at,full_content,preview_text&order=scheduled_for.asc`,{headers:SBH});const d=await r.json();return Array.isArray(d)?d:[];}
     catch{return[];}
   },
   // Generic CA patch (used by both social + email cards) — content_approvals is the single source of truth
@@ -231,6 +231,15 @@ const fromMYTParts=(date,time)=>date?new Date(`${date}T${(time||'09:00')}:00+08:
 // enter the Scheduled folder / be allowed to fire when validateForFire(ca).ok === true.
 const _AIMETA=/^(i\s|i'm|i’m|sure[,!]|here'?s|here’s|could you|to clarify|i appreciate|i notice|i'd be happy|i’d be happy|i can help|let me know|i understand|i cannot|i can't|i'm unable|i’m unable|thanks for|thank you for)/i;
 const _vtxt=s=>(s==null?'':String(s)).trim();
+// A 'publishing' lock is normal & in-flight for the first 5 min after a send starts.
+// Only flag it as a failed publish once it stays stuck PAST the 5-min grace — no false alarms.
+const PUB_GRACE_MS=5*60000;
+function isStuckPub(status,updated_at){
+  if(status!=='publishing')return false;
+  const t=Date.parse(updated_at||'');
+  if(isNaN(t))return true; // unknown timestamp = treat as stuck (safe: surfaces it rather than hides)
+  return (Date.now()-t)>PUB_GRACE_MS;
+}
 function validateForFire(ca){
   const fc=(ca&&ca.full_content)||{}, t=ca&&ca.content_type, hard=[], warn=[];
   const add=(reason,cls)=>hard.push({reason,cls});
@@ -2098,7 +2107,7 @@ function App(){
     const rgMap={};
     sched.filter(s=>s.content_type==='real_gains').forEach(s=>{
       if(s.full_content?.asset_id){
-        const _rv=validateForFire(s); rgMap[s.full_content.asset_id]={week_number:s.week_number,scheduled_for:s.scheduled_for,ca_status:s.status,ca_id:s.id,post_caption:s.full_content?.post_caption||null,fireValid:_rv.ok,fireReasons:_rv.reasons};
+        const _rv=validateForFire(s); rgMap[s.full_content.asset_id]={week_number:s.week_number,scheduled_for:s.scheduled_for,ca_status:s.status,ca_id:s.id,updated_at:s.updated_at,post_caption:s.full_content?.post_caption||null,fireValid:_rv.ok,fireReasons:_rv.reasons};
       }
     });
     setRgSchedule(rgMap);
@@ -2222,8 +2231,8 @@ function App(){
     ...emailCAs.filter(c=>c.status==='approved'&&!validateForFire(c).ok).map(c=>({id:c.id,kind:'email',label:'📧 Email',title:c.subject||('Wk'+c.week_number),when:c.scheduled_for,v:validateForFire(c)})),
     ...mediaAssets.filter(a=>a.status==='approved'&&rgSchedule[a.id]&&!rgSchedule[a.id].fireValid).map(a=>({id:a.id,kind:'real_gains',label:'🏓 Real Gains',title:a.asset_name||a.campaign_name||('Wk'+(rgSchedule[a.id]?.week_number||'')),when:rgSchedule[a.id]?.scheduled_for,v:{ok:false,hard:(rgSchedule[a.id]?.fireReasons||[]).map(r=>({reason:r,cls:/copy|caption|image|subject/i.test(r)?'human':'system'})),reasons:rgSchedule[a.id]?.fireReasons||[]}})),
     // Items mid-publish that didn't confirm = the send FAILED — never shown as Published; surfaced here to fix/retry.
-    ...[...socialCAs,...emailCAs].filter(c=>c.status==='publishing').map(c=>({id:c.id,kind:c.content_type,label:c.content_type==='email'?'📧 Email':'📸 TDOW Social',title:c.subject||('Wk'+c.week_number),when:c.scheduled_for,v:{ok:false,hard:[{reason:'publish didn’t complete — the send failed. Re-open & re-approve to retry.',cls:'system'}],reasons:['publish failed']}})),
-    ...mediaAssets.filter(a=>rgSchedule[a.id]&&rgSchedule[a.id].ca_status==='publishing').map(a=>({id:a.id,kind:'real_gains',label:'🏓 Real Gains',title:a.asset_name||('Wk'+(rgSchedule[a.id]?.week_number||'')),when:rgSchedule[a.id]?.scheduled_for,v:{ok:false,hard:[{reason:'publish didn’t complete — the post failed. Re-open & re-approve to retry.',cls:'system'}],reasons:['publish failed']}})),
+    ...[...socialCAs,...emailCAs].filter(c=>isStuckPub(c.status,c.updated_at)).map(c=>({id:c.id,kind:c.content_type,label:c.content_type==='email'?'📧 Email':'📸 TDOW Social',title:c.subject||('Wk'+c.week_number),when:c.scheduled_for,v:{ok:false,hard:[{reason:'publish didn’t complete — the send failed. Re-open & re-approve to retry.',cls:'system'}],reasons:['publish failed']}})),
+    ...mediaAssets.filter(a=>rgSchedule[a.id]&&isStuckPub(rgSchedule[a.id].ca_status,rgSchedule[a.id].updated_at)).map(a=>({id:a.id,kind:'real_gains',label:'🏓 Real Gains',title:a.asset_name||('Wk'+(rgSchedule[a.id]?.week_number||'')),when:rgSchedule[a.id]?.scheduled_for,v:{ok:false,hard:[{reason:'publish didn’t complete — the post failed. Re-open & re-approve to retry.',cls:'system'}],reasons:['publish failed']}})),
   ];
   contentCounts['flagged']=flaggedList.length;
 
@@ -2241,18 +2250,18 @@ function App(){
   });
   const filteredSocialCAs=socialCAs.filter(ca=>{
     if(filterCampaign!=='all'&&filterCampaign!=='social')return false;
-    if(filterStatus==='flagged')return ca.status==='publishing'||(ca.status==='approved'&&!validateForFire(ca).ok);
+    if(filterStatus==='flagged')return isStuckPub(ca.status,ca.updated_at)||(ca.status==='approved'&&!validateForFire(ca).ok);
     if(filterStatus!=='all'&&CA_TO_STATUS[ca.status]!==filterStatus)return false;
     return true;
   });
   const filteredEmailCAs=emailCAs.filter(ca=>{
     if(filterCampaign!=='all'&&filterCampaign!=='email')return false;
-    if(filterStatus==='flagged')return ca.status==='publishing'||(ca.status==='approved'&&!validateForFire(ca).ok);
+    if(filterStatus==='flagged')return isStuckPub(ca.status,ca.updated_at)||(ca.status==='approved'&&!validateForFire(ca).ok);
     if(filterStatus!=='all'&&CA_TO_STATUS[ca.status]!==filterStatus)return false;
     return true;
   });
   const filteredMedia=mediaAssets.filter(asset=>{
-    if(filterStatus==='flagged'){ const rg=rgSchedule[asset.id]; if(!((rg&&rg.ca_status==='publishing')||(asset.status==='approved'&&rg&&!rg.fireValid)))return false; }
+    if(filterStatus==='flagged'){ const rg=rgSchedule[asset.id]; if(!((rg&&isStuckPub(rg.ca_status,rg.updated_at))||(asset.status==='approved'&&rg&&!rg.fireValid)))return false; }
     else if(filterStatus!=='all'&&asset.status!==filterStatus)return false;
     if(filterClient!=='all'&&asset.client_id!==filterClient)return false;
     if(filterCampaign!=='all'&&assetCampaign(asset)!==filterCampaign)return false;
