@@ -273,6 +273,43 @@ function Badge({status}){
 }
 
 // ── MEDIA ASSET CARD ─────────────────────────────────────────
+// Inline Title + Schedule (MYT) quick-editor for APPROVED/scheduled items — lets Jason make
+// last-minute tweaks WITHOUT re-opening (status stays approved). onSave(title,isoUTC) does the
+// type-specific persistence. content_approvals is the single source of truth, so every tab
+// (Approved/Flagged/Rejected/Scheduled/Deployments/Published) reflects the change on next refresh.
+function InlineTitleDate({title0,iso0,locked,lockedNote,note,onSave}){
+  const p0=toMYTParts(iso0);
+  const[t,setT]=useState(title0||'');
+  const[d,setD]=useState(p0.date);
+  const[tm,setTm]=useState(p0.time);
+  const[open,setOpen]=useState(false);
+  const[busy,setBusy]=useState(false);
+  const[msg,setMsg]=useState('');
+  useEffect(()=>{const p=toMYTParts(iso0);setD(p.date);setTm(p.time);setT(title0||'');},[iso0,title0]);
+  async function save(){
+    setBusy(true);
+    try{ await onSave((t||'').trim(), fromMYTParts(d,tm)); setMsg('✓ Saved — updated across all tabs'); setOpen(false); setTimeout(()=>setMsg(''),4000); }
+    catch(e){ alert('Save failed: '+e.message); }
+    setBusy(false);
+  }
+  if(locked) return html`<div style=${{marginTop:8,fontSize:11,color:C.mt}}>🔒 ${lockedNote||'Title & date are locked — already published.'}</div>`;
+  return html`<div style=${{marginTop:8}}>
+    ${!open
+      ?html`<span><button onClick=${()=>setOpen(true)} style=${{background:'transparent',color:C.ac,border:`0.5px solid ${C.ac}45`,borderRadius:6,padding:'5px 12px',fontSize:11,fontWeight:600,cursor:'pointer'}}>✏️ Edit title / date</button>${msg&&html`<span style=${{color:C.ok,fontSize:11,marginLeft:8,fontWeight:600}}>${msg}</span>`}</span>`
+      :html`<div style=${{background:C.s2,border:`1px solid ${C.bdB}`,borderRadius:8,padding:'10px 12px'}}>
+        <span style=${{fontSize:11,fontWeight:700,color:C.dm,letterSpacing:'0.4px',textTransform:'uppercase',display:'block',marginBottom:8}}>✏️ Title + Schedule (Malaysia time)</span>
+        <input value=${t} onInput=${e=>setT(e.target.value)} placeholder="Title" style=${{background:C.s1,border:`1px solid ${C.bdB}`,borderRadius:6,padding:'7px 10px',fontSize:12,color:C.tx,width:'100%',outline:'none',marginBottom:8,boxSizing:'border-box'}}/>
+        <div style=${{display:'flex',gap:8,flexWrap:'wrap',alignItems:'center'}}>
+          <input type="date" value=${d} onChange=${e=>setD(e.target.value)} style=${{background:C.s1,border:`1px solid ${C.bdB}`,borderRadius:6,padding:'7px 10px',fontSize:12,color:C.tx,outline:'none',flex:'1 1 150px'}}/>
+          <input type="time" value=${tm} onChange=${e=>setTm(e.target.value)} style=${{background:C.s1,border:`1px solid ${C.bdB}`,borderRadius:6,padding:'7px 10px',fontSize:12,color:C.tx,outline:'none',flex:'0 1 120px'}}/>
+          <button onClick=${save} disabled=${busy} style=${{background:C.ac,border:'none',borderRadius:6,color:'#fff',padding:'7px 16px',fontSize:12,fontWeight:600,cursor:busy?'default':'pointer',opacity:busy?0.6:1}}>${busy?'Saving…':'💾 Save'}</button>
+          <button onClick=${()=>setOpen(false)} disabled=${busy} style=${{background:'transparent',color:C.dm,border:`0.5px solid ${C.bd}`,borderRadius:6,padding:'7px 12px',fontSize:12,cursor:'pointer'}}>Cancel</button>
+        </div>
+        ${note&&html`<div style=${{color:C.mt,fontSize:10,marginTop:6}}>${note}</div>`}
+      </div>`}
+  </div>`;
+}
+
 function MediaAssetCard({asset,onUpdate,onArchive,onDelete,weekInfo}){
   const[feedback,setFeedback]=useState(asset.feedback||'');
   const[revisions,setRevisions]=useState([]);
@@ -306,6 +343,22 @@ function MediaAssetCard({asset,onUpdate,onArchive,onDelete,weekInfo}){
   const isVideo=asset.asset_type==='video'||asset.asset_url?.match(/\.(mp4|mov|webm)/i);
   const isActionable=['pending_review','revision_requested'].includes(asset.status);
   const isApproved=asset.status==='approved';
+  const rgLocked=['published','publishing'].includes(weekInfo?.ca_status);
+  // Dual-write title+date for Real Gains: linked content_approvals (what the watchdog fires on +
+  // Deployments subject) AND campaign_assets.data (card + Schedule rgTitle read this). Both move together.
+  async function saveRgTitleDate(t,iso){
+    const wk=weekInfo?.week_number||asset.data?.week||'';
+    if(weekInfo?.ca_id){
+      const cp={updated_at:new Date().toISOString()};
+      if(iso)cp.scheduled_for=iso;
+      if(t)cp.subject=`Real Gains Wk${wk}: ${t}`;
+      await fetch(`${SB_URL}/rest/v1/content_approvals?id=eq.${weekInfo.ca_id}`,{method:'PATCH',headers:{...SBH,'Prefer':'return=minimal'},body:JSON.stringify(cp)});
+    }
+    const nd={...(asset.data||{})};
+    if(t)nd.topic=t;
+    if(iso)nd.scheduled_for=iso.slice(0,10);
+    await onUpdate({...asset,data:nd});
+  }
   const borderColor=asset.status==='pending_review'?C.bdB:asset.status==='approved'?C.ok+'50':asset.status==='revision_requested'?C.pu+'50':C.bd;
 
   async function loadHistory(){
@@ -521,6 +574,13 @@ function MediaAssetCard({asset,onUpdate,onArchive,onDelete,weekInfo}){
       <span style=${{color:weekInfo.ca_status==='approved'?'#34d399':weekInfo.ca_status==='published'?'#2dd4bf':'#5a8ab0',fontSize:11}}>
         ${weekInfo.ca_status==='approved'?'✓ Approved · ':weekInfo.ca_status==='published'?'🚀 Published · ':'⏳ Pending · '}Fri ${new Date(weekInfo.scheduled_for).toLocaleDateString('en-MY',{day:'numeric',month:'short',year:'numeric',...MYT})}
       </span>
+    </div>`}
+
+    ${weekInfo&&html`<div style=${{padding:'4px 14px 10px',borderBottom:`0.5px solid ${C.bd}`,background:'rgba(45,212,191,0.04)'}}>
+      <${InlineTitleDate} title0=${asset.data?.topic||''} iso0=${weekInfo.scheduled_for} locked=${rgLocked}
+        lockedNote=${`Title & date locked — this Real Gains post is already ${weekInfo.ca_status}.`}
+        note=${`Shows as "Real Gains Wk${weekInfo.week_number||''}: …" across Schedule, Deployments, Flagged & Published. Editing the date changes when it auto-publishes.`}
+        onSave=${saveRgTitleDate} />
     </div>`}
 
     <!-- Header -->
@@ -1213,6 +1273,9 @@ function SocialCaptionCard({ca,onUpdate,onDelete}){
           </button>
           <button onClick=${doReopen} disabled=${busy} style=${{background:'transparent',color:C.dm,border:`0.5px solid ${C.bd}`,borderRadius:6,padding:'5px 12px',fontSize:11,cursor:'pointer',opacity:busy?0.6:1}}>Re-open for Revision</button>
         </div>
+        <${InlineTitleDate} title0=${drillName} iso0=${ca.scheduled_for} locked=${false}
+          note=${`Shows as "TDOW Social Wk${ca.week_number}: …". Stays approved/scheduled — updates the Schedule, Deployments & Flagged tabs and the auto-post time. (The caption is separate, edited above.)`}
+          onSave=${async(t,iso)=>{const patch={};if(iso)patch.scheduled_for=iso;if(t)patch.subject=`TDOW Social Wk${ca.week_number}: ${t}`;if(Object.keys(patch).length)await onUpdate(ca.id,patch);}} />
         ${postResult?html`<div style=${{padding:'6px 10px',borderRadius:6,background:postResult.ok?`${C.ok}12`:`${C.er}12`,color:postResult.ok?C.ok:C.er,fontSize:11,marginBottom:8}}>${postResult.ok?'✓ ':'✗ '}${postResult.msg}</div>`:''}
         <div style=${{borderTop:`0.5px solid ${C.bd}`,paddingTop:10,marginTop:4}}>
           <textarea placeholder="Caption revision notes for AI rewrite — describe what to change…" value=${note} onInput=${e=>setNote(e.target.value)}
@@ -1554,6 +1617,9 @@ function EmailCard({ca,onUpdate,onDelete}){
           <button onClick=${doBlastNow} disabled=${busy||blasting} style=${{background:blasting?'transparent':`${C.ok}18`,color:C.ok,border:`0.5px solid ${C.ok}50`,borderRadius:6,padding:'5px 14px',fontSize:12,fontWeight:700,cursor:(busy||blasting)?'default':'pointer',opacity:(busy||blasting)?0.6:1}}>${blasting?'⏳ Firing…':'📧 Blast Now'}</button>
           <button onClick=${doReopen} disabled=${busy} style=${{background:'transparent',color:C.dm,border:`0.5px solid ${C.bd}`,borderRadius:6,padding:'5px 12px',fontSize:11,cursor:'pointer',opacity:busy?0.6:1}}>Re-open for Revision</button>
         </div>
+        <${InlineTitleDate} title0=${ca.full_content?.emailSubject||ca.subject||''} iso0=${ca.scheduled_for} locked=${false}
+          note=${'For email the title IS the subject line recipients see. Stays approved/scheduled — updates the Schedule & Deployments tabs and the auto-send time.'}
+          onSave=${async(t,iso)=>{const r=await fetch(`${SB_URL}/rest/v1/content_approvals?id=eq.${ca.id}&select=full_content`,{headers:SBH});const recs=await r.json();const fc={...(recs?.[0]?.full_content||ca.full_content||{})};if(t)fc.emailSubject=t;const patch={full_content:fc};if(t)patch.subject=t;if(iso)patch.scheduled_for=iso;await onUpdate(ca.id,patch);}} />
         ${blastResult?html`<div style=${{padding:'6px 10px',borderRadius:6,background:blastResult.ok?`${C.ok}12`:`${C.er}12`,color:blastResult.ok?C.ok:C.er,fontSize:11}}>${blastResult.ok?'✓ ':'✗ '}${blastResult.msg}</div>`:''}
         ${testSendBox}
       </div>`:''}
