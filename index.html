@@ -229,7 +229,11 @@ const fromMYTParts=(date,time)=>date?new Date(`${date}T${(time||'09:00')}:00+08:
 // email→drillDescription||emailBody+subject, social→full_content.caption(+media)). Each blocker is tagged
 // 'system' (auto-fixable by the backend Integrity Doctor) or 'human' (only Jason can resolve). An item may ONLY
 // enter the Scheduled folder / be allowed to fire when validateForFire(ca).ok === true.
-const _AIMETA=/^(i\s|i'm|i’m|sure[,!]|here'?s|here’s|could you|to clarify|i appreciate|i notice|i'd be happy|i’d be happy|i can help|let me know|i understand|i cannot|i can't|i'm unable|i’m unable|thanks for|thank you for)/i;
+// Detects a genuine AI assistant/clarification reply (claude-proxy returned chat, not content).
+// IMPORTANT: must NOT flag real marketing copy that legitimately opens with "Here's…" or "I'm…".
+// So "Here's…" only trips when it refers to the deliverable ("here's the revised caption"), and
+// "I'm/I can't/sure" only trip in assistant phrasings — not normal 2nd-person brand copy.
+const _AIMETA=/^\s*(i['’]?m sorry|i apologi[sz]e|i cannot|i can['’]?t (help|assist|provide|create|generate|do)|i['’]?m unable|i['’]?m not able|i['’]?d be (happy|glad) to|i can (definitely )?help (you )?(with|out)|sure[,!]?\s+(here|i|let)|here['’]?s (the |your |a )?(revised|updated|rewritten|new|edited|improved) (caption|copy|post|version|text|email|draft)|to clarify[,:]\s|could you (please )?(clarify|provide|specify|confirm)|please (clarify|provide|confirm|let me know)|let me know (if|what|how|which|when)|i appreciate (your|the)|thanks? (for |you )(reaching|your|the)|as an ai\b|i don['’]?t have (access|enough|the))/i;
 const _vtxt=s=>(s==null?'':String(s)).trim();
 // A 'publishing' lock is normal & in-flight for the first 5 min after a send starts.
 // Only flag it as a failed publish once it stays stuck PAST the 5-min grace — no false alarms.
@@ -242,6 +246,10 @@ function isStuckPub(status,updated_at){
 }
 function validateForFire(ca){
   const fc=(ca&&ca.full_content)||{}, t=ca&&ca.content_type, hard=[], warn=[];
+  // Jason's manual "Approve anyway" — he's reviewed it, so bypass the AI-reply SUSPICION heuristic.
+  // Structural checks (schedule set, media present, copy non-empty) still apply — override never
+  // lets a genuinely-broken post fire.
+  const override=!!fc.fire_override;
   const add=(reason,cls)=>hard.push({reason,cls});
   // schedule must exist + parse
   const sf=ca&&ca.scheduled_for, sd=sf?new Date(sf):null;
@@ -255,7 +263,7 @@ function validateForFire(ca){
     if(!_vtxt(fc.caption)&&_vtxt(ca&&ca.preview_text)) add('caption not saved to full_content (publisher would fall back to Google Sheets)','system'); }
   else add('unknown content type','human');
   if(copy.length<25) add('copy is empty or too short','human');
-  else if(_AIMETA.test(copy)) add('copy looks like an AI reply, not final content','human');
+  else if(_AIMETA.test(copy) && !override) add('copy looks like an AI reply, not final content','human');
   if(mediaReq && !/^https?:\/\//.test(media)) add(t==='social'?'no IG/FB media set':'image missing','human');
   return {ok:hard.length===0, hard, warn,
     needsHuman:hard.some(h=>h.cls==='human'), needsSystem:hard.some(h=>h.cls==='system'),
@@ -2193,6 +2201,22 @@ function App(){
   useEffect(()=>{loadData();},[loadData]);
   useEffect(()=>{const t=setInterval(()=>loadData(true),60000);return()=>clearInterval(t);},[loadData]);
 
+  // "Approve anyway" — Jason confirms a flagged item's content is actually correct (false positive).
+  // Writes full_content.fire_override so validateForFire (app + n8n watchdog) skips the AI-reply
+  // suspicion check; status stays approved; item moves into Schedule on reload.
+  async function overrideFlag(f){
+    const caId = f.kind==='real_gains' ? (rgSchedule[f.id]&&rgSchedule[f.id].ca_id) : f.id;
+    if(!caId){alert('Could not find the linked record to override.');return;}
+    if(!confirm(`Approve "${(f.title||'').slice(0,60)}" anyway and schedule it to publish?\n\nThis confirms you've reviewed it and the content is correct. It bypasses the AI-reply suspicion check and moves into Schedule. (Genuinely missing image/copy/schedule still can't fire.)`))return;
+    try{
+      const r=await fetch(`${SB_URL}/rest/v1/content_approvals?id=eq.${caId}&select=full_content`,{headers:SBH});
+      const recs=await r.json();
+      const fc={...((recs&&recs[0]&&recs[0].full_content)||{}),fire_override:true};
+      await fetch(`${SB_URL}/rest/v1/content_approvals?id=eq.${caId}`,{method:'PATCH',headers:{...SBH,'Prefer':'return=minimal'},body:JSON.stringify({full_content:fc,status:'approved',updated_at:new Date().toISOString()})});
+      await loadData();
+    }catch(e){alert('Override failed: '+e.message);}
+  }
+
   async function handleCopyUpdate(item){
     setBusy(p=>({...p,[item.id]:true}));
     await db.updateItem(item);
@@ -2503,8 +2527,12 @@ function App(){
                     <span style=${{color:C.mt,fontSize:11}}>${f.when?fmtDay(f.when):''}</span>
                   </div>
                   ${(f.v.hard||[]).map((h,hi)=>html`<div key=${hi} style=${{fontSize:11,color:h.cls==='system'?'#7dd3fc':'#fbbf24'}}>${h.cls==='system'?'🛠 auto-fixing (system): ':'⚠️ needs you: '}${h.reason}</div>`)}
+                  ${(f.v.hard||[]).some(h=>/AI reply/i.test(h.reason))&&html`<div style=${{marginTop:9,display:'flex',gap:8,alignItems:'center',flexWrap:'wrap'}}>
+                    <button onClick=${()=>overrideFlag(f)} style=${{background:'rgba(52,211,153,0.15)',color:'#34d399',border:'0.5px solid rgba(52,211,153,0.45)',borderRadius:6,padding:'5px 14px',fontSize:12,fontWeight:700,cursor:'pointer',whiteSpace:'nowrap'}}>✓ Approve anyway — content is correct</button>
+                    <span style=${{color:C.mt,fontSize:10}}>Use if the copy is genuinely final — bypasses the AI-reply suspicion check and moves it into Schedule.</span>
+                  </div>`}
                 </div>`)}
-                <div style=${{color:C.mt,fontSize:11,marginTop:6}}>Fix the ⚠️ items below (open the card to edit). Once resolved they move into Schedule automatically.</div>
+                <div style=${{color:C.mt,fontSize:11,marginTop:6}}>Fix the ⚠️ items below (open the card to edit), or use "Approve anyway" if a flag is a false alarm. Resolved items move into Schedule automatically.</div>
               </div>`}
               ${pendingArchiveCleanup>0&&html`<div style=${{background:'rgba(45,212,191,0.07)',border:'0.5px solid rgba(45,212,191,0.25)',borderRadius:8,padding:'10px 16px',marginBottom:16,display:'flex',alignItems:'center',gap:12}}>
                 <span style=${{fontSize:13}}>📦</span>
