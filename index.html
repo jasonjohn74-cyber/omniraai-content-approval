@@ -2225,14 +2225,16 @@ function App(){
   Object.keys(STATUS).forEach(s=>{contentCounts[s]=(copyCounts[s]||0)+(mediaCounts[s]||0)+(soCACounts[s]||0)+(emCACounts[s]||0);});
   // Scheduled = approved content that has a scheduled_for (queued to go out) AND passes the integrity check
   contentCounts['scheduled']=[...socialCAs,...emailCAs].filter(c=>c.status==='approved'&&c.scheduled_for&&validateForFire(c).ok).length+mediaAssets.filter(a=>a.status==='approved'&&rgSchedule[a.id]&&rgSchedule[a.id].scheduled_for&&rgSchedule[a.id].fireValid).length;
+  // Real Gains has no human title column — derive "Wk N: Topic" from data.{week,topic}; fall back to slug only if absent.
+  const rgTitle=(a)=>{const wk=a?.data?.week??rgSchedule[a?.id]?.week_number;const topic=a?.data?.topic;if(topic)return wk?`Wk${wk}: ${topic}`:topic;return a?.asset_name||a?.campaign_name||'Real Gains post';};
   // Flagged Issue = approved but FAILS the integrity check — held out of Schedule until resolved (🛠 system self-heals · ⚠️ needs you)
   const flaggedList=[
     ...socialCAs.filter(c=>c.status==='approved'&&!validateForFire(c).ok).map(c=>({id:c.id,kind:'social',label:'📸 TDOW Social',title:c.subject||('Wk'+c.week_number),when:c.scheduled_for,v:validateForFire(c)})),
     ...emailCAs.filter(c=>c.status==='approved'&&!validateForFire(c).ok).map(c=>({id:c.id,kind:'email',label:'📧 Email',title:c.subject||('Wk'+c.week_number),when:c.scheduled_for,v:validateForFire(c)})),
-    ...mediaAssets.filter(a=>a.status==='approved'&&rgSchedule[a.id]&&!rgSchedule[a.id].fireValid).map(a=>({id:a.id,kind:'real_gains',label:'🏓 Real Gains',title:a.asset_name||a.campaign_name||('Wk'+(rgSchedule[a.id]?.week_number||'')),when:rgSchedule[a.id]?.scheduled_for,v:{ok:false,hard:(rgSchedule[a.id]?.fireReasons||[]).map(r=>({reason:r,cls:/copy|caption|image|subject/i.test(r)?'human':'system'})),reasons:rgSchedule[a.id]?.fireReasons||[]}})),
+    ...mediaAssets.filter(a=>a.status==='approved'&&rgSchedule[a.id]&&!rgSchedule[a.id].fireValid).map(a=>({id:a.id,kind:'real_gains',label:'🏓 Real Gains',title:rgTitle(a),when:rgSchedule[a.id]?.scheduled_for,v:{ok:false,hard:(rgSchedule[a.id]?.fireReasons||[]).map(r=>({reason:r,cls:/copy|caption|image|subject/i.test(r)?'human':'system'})),reasons:rgSchedule[a.id]?.fireReasons||[]}})),
     // Items mid-publish that didn't confirm = the send FAILED — never shown as Published; surfaced here to fix/retry.
     ...[...socialCAs,...emailCAs].filter(c=>isStuckPub(c.status,c.updated_at)).map(c=>({id:c.id,kind:c.content_type,label:c.content_type==='email'?'📧 Email':'📸 TDOW Social',title:c.subject||('Wk'+c.week_number),when:c.scheduled_for,v:{ok:false,hard:[{reason:'publish didn’t complete — the send failed. Re-open & re-approve to retry.',cls:'system'}],reasons:['publish failed']}})),
-    ...mediaAssets.filter(a=>rgSchedule[a.id]&&isStuckPub(rgSchedule[a.id].ca_status,rgSchedule[a.id].updated_at)).map(a=>({id:a.id,kind:'real_gains',label:'🏓 Real Gains',title:a.asset_name||('Wk'+(rgSchedule[a.id]?.week_number||'')),when:rgSchedule[a.id]?.scheduled_for,v:{ok:false,hard:[{reason:'publish didn’t complete — the post failed. Re-open & re-approve to retry.',cls:'system'}],reasons:['publish failed']}})),
+    ...mediaAssets.filter(a=>rgSchedule[a.id]&&isStuckPub(rgSchedule[a.id].ca_status,rgSchedule[a.id].updated_at)).map(a=>({id:a.id,kind:'real_gains',label:'🏓 Real Gains',title:rgTitle(a),when:rgSchedule[a.id]?.scheduled_for,v:{ok:false,hard:[{reason:'publish didn’t complete — the post failed. Re-open & re-approve to retry.',cls:'system'}],reasons:['publish failed']}})),
   ];
   contentCounts['flagged']=flaggedList.length;
 
@@ -2291,7 +2293,7 @@ function App(){
   const scheduledRows=[
     ...socialCAs.filter(c=>c.status==='approved'&&c.scheduled_for&&validateForFire(c).ok).map(c=>({id:c.id,date:c.scheduled_for,ck:'social',campaign:'TDOW Social',title:c.subject||'Social post',platform:'📸 IG · 📘 FB',clientId:null})),
     ...emailCAs.filter(c=>c.status==='approved'&&c.scheduled_for&&validateForFire(c).ok).map(c=>({id:c.id,date:c.scheduled_for,ck:'email',campaign:c.full_content?.seriesName||(c.week_number?'TDOW Email':'Email'),title:c.subject||'Email',platform:'📧 Email',clientId:null})),
-    ...mediaAssets.filter(a=>a.status==='approved'&&rgSchedule[a.id]&&rgSchedule[a.id].scheduled_for&&rgSchedule[a.id].fireValid).map(a=>({id:a.id,date:rgSchedule[a.id].scheduled_for,ck:'real_gains',campaign:'Real Gains',title:a.asset_name||a.campaign_name||'Real Gains post',platform:'📸 IG · 📘 FB',clientId:a.client_id})),
+    ...mediaAssets.filter(a=>a.status==='approved'&&rgSchedule[a.id]&&rgSchedule[a.id].scheduled_for&&rgSchedule[a.id].fireValid).map(a=>({id:a.id,date:rgSchedule[a.id].scheduled_for,ck:'real_gains',campaign:'Real Gains',title:rgTitle(a),platform:'📸 IG · 📘 FB',clientId:a.client_id})),
   ].filter(r=>(filterCampaign==='all'||r.ck===filterCampaign)&&(filterClient==='all'||!r.clientId||r.clientId===filterClient))
    .sort((a,b)=>new Date(a.date)-new Date(b.date));
   const scheduledTableHtml=html`<div>
