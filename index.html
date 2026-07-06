@@ -142,6 +142,20 @@ const db={
     try{await fetch(`${SB_URL}/rest/v1/content_archive`,{method:'POST',headers:{...SBH,'Prefer':'return=minimal'},body:JSON.stringify(row)});}
     catch(e){console.error('archiveAsset error:',e);throw e;}
   },
+  // Archive a content_approvals row (snapshot to content_archive) — used by the Published → Archive action.
+  async archiveCA(ca){
+    const fc=ca.full_content||{};
+    const chMap={email:'📧 Email Blast',social:'📸 Instagram · 📘 Facebook',blog:'📝 Website Blog',google:'🔍 Google/SEO',tiktok:'🎵 TikTok',print:'🖨 Print'};
+    const row={
+      client_id:ca.client_id||null,campaign_id:ca.campaign_id||'unknown',campaign_name:fc.campaignName||fc.seriesName||null,
+      content_type:ca.content_type,week_number:ca.week_number||null,title:ca.subject||null,channel:chMap[ca.content_type]||ca.content_type,
+      asset_url:fc.mediaUrl||fc.image_url||fc.wp_link||null,copy_body:fc.copy||fc.caption||fc.bodyHtml||null,
+      published_at:ca.approved_at||new Date().toISOString(),original_asset_id:null,original_ca_id:ca.id,full_data:{content_approval:ca},
+    };
+    try{await fetch(`${SB_URL}/rest/v1/content_archive`,{method:'POST',headers:{...SBH,'Prefer':'return=minimal'},body:JSON.stringify(row)});
+      await fetch(`${SB_URL}/rest/v1/content_approvals?id=eq.${ca.id}`,{method:'DELETE',headers:SBH});}
+    catch(e){console.error('archiveCA error:',e);throw e;}
+  },
   async deleteAsset(assetId){
     try{await fetch(`${SB_URL}/rest/v1/campaign_assets?id=eq.${assetId}`,{method:'DELETE',headers:SBH});}
     catch(e){console.error(e);}
@@ -155,11 +169,16 @@ const db={
     catch{return[];}
   },
   async getSocialCAs(){
-    try{const r=await fetch(`${SB_URL}/rest/v1/content_approvals?content_type=eq.social&select=id,content_type,week_number,subject,status,scheduled_for,approved_at,updated_at,full_content,preview_text&order=week_number.asc`,{headers:SBH});const d=await r.json();return Array.isArray(d)?d:[];}
+    try{const r=await fetch(`${SB_URL}/rest/v1/content_approvals?content_type=eq.social&select=id,client_id,campaign_id,asset_code,content_type,week_number,subject,status,scheduled_for,approved_at,updated_at,full_content,preview_text&order=week_number.asc`,{headers:SBH});const d=await r.json();const rows=Array.isArray(d)?d:[];return rows.map(c=>({...c,campaign_name:c.full_content?.campaignName||c.full_content?.seriesName||null}));}
     catch{return[];}
   },
   async getEmailCAs(){
-    try{const r=await fetch(`${SB_URL}/rest/v1/content_approvals?content_type=eq.email&select=id,content_type,week_number,subject,status,scheduled_for,approved_at,updated_at,full_content,preview_text&order=scheduled_for.asc`,{headers:SBH});const d=await r.json();return Array.isArray(d)?d:[];}
+    try{const r=await fetch(`${SB_URL}/rest/v1/content_approvals?content_type=eq.email&select=id,client_id,campaign_id,asset_code,content_type,week_number,subject,status,scheduled_for,approved_at,updated_at,full_content,preview_text&order=scheduled_for.asc`,{headers:SBH});const d=await r.json();const rows=Array.isArray(d)?d:[];return rows.map(c=>({...c,campaign_name:c.full_content?.campaignName||c.full_content?.seriesName||null}));}
+    catch{return[];}
+  },
+  // New canonical channels emitted by App 2 Card 3 (content_type = publishing medium).
+  async getExtraCAs(){
+    try{const r=await fetch(`${SB_URL}/rest/v1/content_approvals?content_type=in.(tiktok,blog,google,print)&select=id,client_id,campaign_id,asset_code,content_type,subject,status,scheduled_for,approved_at,updated_at,full_content,preview_text&order=scheduled_for.asc`,{headers:SBH});const d=await r.json();const rows=Array.isArray(d)?d:[];return rows.map(c=>({...c,campaign_name:c.full_content?.campaignName||c.full_content?.seriesName||null}));}
     catch{return[];}
   },
   // Generic CA patch (used by both social + email cards) — content_approvals is the single source of truth
@@ -251,20 +270,35 @@ function validateForFire(ca){
   // lets a genuinely-broken post fire.
   const override=!!fc.fire_override;
   const add=(reason,cls)=>hard.push({reason,cls});
-  // schedule must exist + parse
+  // print = produce-and-download only; it is never scheduled/fired, so it needs no schedule date.
+  const isPrint=t==='print';
+  // schedule must exist + parse (print excepted)
   const sf=ca&&ca.scheduled_for, sd=sf?new Date(sf):null;
-  if(!sf||!sd||isNaN(sd.getTime())) add('no valid schedule date/time set','human');
-  else if(sd.getTime()<Date.now()-30*60000 && ca.status!=='published') warn.push('scheduled time is in the past');
-  // resolve copy + media exactly as the publisher does
-  let copy='', media='', mediaReq=false;
-  if(t==='real_gains'){ copy=_vtxt(fc.post_caption||fc.copy_body); media=_vtxt(fc.image_url); mediaReq=true; }
-  else if(t==='email'){ copy=_vtxt(fc.drillDescription||fc.emailBody); if(!_vtxt(fc.emailSubject||(ca&&ca.subject))) add('email subject missing','human'); if(!_vtxt(fc.imageUrl)) warn.push('email image missing'); }
-  else if(t==='social'){ copy=_vtxt(fc.caption||(ca&&ca.preview_text)); media=_vtxt(fc.igVideoUrl||fc.youtubeUrl||fc.youtube_url); mediaReq=true;
-    if(!_vtxt(fc.caption)&&_vtxt(ca&&ca.preview_text)) add('caption not saved to full_content (publisher would fall back to Google Sheets)','system'); }
+  if(!isPrint){
+    if(!sf||!sd||isNaN(sd.getTime())) add('no valid schedule date/time set','human');
+    else if(sd.getTime()<Date.now()-30*60000 && ca.status!=='published') warn.push('scheduled time is in the past');
+  }
+  // CANONICAL-FIRST: prefer the unified full_content shape (copy/mediaUrl/mediaType/subject),
+  // fall back to the legacy per-type fields so existing Titan rows still validate unchanged.
+  let copy=_vtxt(fc.copy), media=_vtxt(fc.mediaUrl), mediaReq=false, minLen=25;
+  const mediaType=_vtxt(fc.mediaType);
+  if(t==='real_gains'){ copy=copy||_vtxt(fc.post_caption||fc.copy_body); media=media||_vtxt(fc.image_url); mediaReq=true; }
+  else if(t==='email'){ copy=copy||_vtxt(fc.bodyHtml||fc.drillDescription||fc.emailBody); if(!_vtxt(fc.subject||fc.emailSubject||(ca&&ca.subject))) add('email subject missing','human'); if(!media&&!_vtxt(fc.imageUrl)) warn.push('email image missing'); }
+  else if(t==='social'){ copy=copy||_vtxt(fc.caption||(ca&&ca.preview_text)); media=media||_vtxt(fc.igVideoUrl||fc.youtubeUrl||fc.youtube_url); mediaReq=true;
+    if(!_vtxt(fc.copy)&&!_vtxt(fc.caption)&&_vtxt(ca&&ca.preview_text)) add('caption not saved to full_content (publisher would fall back to Google Sheets)','system'); }
+  else if(t==='tiktok'){ copy=copy||_vtxt(fc.caption); media=media||_vtxt(fc.igVideoUrl||fc.videoUrl); mediaReq=true; if(mediaType&&mediaType!=='video') warn.push('TikTok expects a video'); }
+  else if(t==='blog'){ copy=copy||_vtxt(fc.bodyHtml||fc.emailBody); if(!_vtxt(fc.subject||(ca&&ca.subject))) add('blog title (subject) missing','human'); if(!media) warn.push('no featured image set'); }
+  else if(t==='google'){ copy=copy||_vtxt(fc.caption); minLen=10; }
+  else if(t==='print'){ copy=copy||_vtxt(fc.caption); media=media||_vtxt(fc.image_url); mediaReq=true; minLen=10; }
   else add('unknown content type','human');
-  if(copy.length<25) add('copy is empty or too short','human');
+  // #23 Carousel: needs ≥2 slide images; first slide doubles as the cover/media url.
+  if(mediaType==='carousel'){ const urls=Array.isArray(fc.mediaUrls)?fc.mediaUrls.filter(u=>/^https?:\/\//.test(u)):[];
+    if(urls.length<2) add('carousel needs at least 2 slide images','human');
+    else if(fc.slideCount&&urls.length<fc.slideCount) warn.push(`only ${urls.length} of ${fc.slideCount} slides have images`);
+    media=media||urls[0]||''; }
+  if(copy.length<minLen) add('copy is empty or too short','human');
   else if(_AIMETA.test(copy) && !override) add('copy looks like an AI reply, not final content','human');
-  if(mediaReq && !/^https?:\/\//.test(media)) add(t==='social'?'no IG/FB media set':'image missing','human');
+  if(mediaReq && !/^https?:\/\//.test(media)) add((t==='social'||t==='tiktok')?'no video/media set':'image missing','human');
   return {ok:hard.length===0, hard, warn,
     needsHuman:hard.some(h=>h.cls==='human'), needsSystem:hard.some(h=>h.cls==='system'),
     reasons:hard.map(h=>h.reason)};
@@ -1042,6 +1076,163 @@ function CopyContentCard({item,onUpdate,onDelete,busy}){
 }
 
 // ── SOCIAL CAPTION CARD ───────────────────────────────────────
+// ── GENERIC CHANNEL CARD ─────────────────────────────────────
+// Canonical-shape card for the new App-2 channels (tiktok · blog · google · print).
+// Reads/writes the unified full_content (copy/subject/bodyHtml/mediaUrl/mediaType/visualPrompt).
+// Print is produce-only: no schedule, "Mark Produced" instead of approve-to-fire, + Download.
+function ChannelCard({ca,onUpdate,onDelete,onArchive}){
+  const fc=ca.full_content||{};
+  const ct=ca.content_type;
+  const meta=CAMPAIGN_META[ct]||{icon:'📄',label:ct,channel:ct,color:C.dm};
+  const isPrint=PRODUCE_ONLY.has(ct);
+  const isBlog=ct==='blog';
+  const[copyText,setCopyText]=useState(fc.copy||fc.caption||'');
+  const[subject,setSubject]=useState(fc.subject||ca.subject||'');
+  const[bodyHtml,setBodyHtml]=useState(fc.bodyHtml||'');
+  const[mediaUrl,setMediaUrl]=useState(fc.mediaUrl||fc.image_url||'');
+  const[busy,setBusy]=useState(false);
+  const[saveMsg,setSaveMsg]=useState('');
+  const[rejectMode,setRejectMode]=useState(false);
+  const[rejectRemark,setRejectRemark]=useState('');
+  const[genning,setGenning]=useState(false);
+  const[publishing,setPublishing]=useState(false);
+  const[publishMsg,setPublishMsg]=useState('');
+  const[previewDoc,setPreviewDoc]=useState(null);
+  const[schedDate,setSchedDate]=useState(()=>toMYTParts(ca.scheduled_for).date);
+  const[schedTime,setSchedTime]=useState(()=>toMYTParts(ca.scheduled_for).time);
+  useEffect(()=>{setCopyText(ca.full_content?.copy||ca.full_content?.caption||'');setSubject(ca.full_content?.subject||ca.subject||'');setBodyHtml(ca.full_content?.bodyHtml||'');setMediaUrl(ca.full_content?.mediaUrl||ca.full_content?.image_url||'');},[ca.id]);
+  function schedPatch(){if(isPrint)return{};const iso=fromMYTParts(schedDate,schedTime);return iso?{scheduled_for:iso}:{};}
+  function buildFc(extra={}){return{...fc,copy:copyText,subject,bodyHtml,mediaUrl,mediaType:fc.mediaType||(mediaUrl?'image':'none'),...extra};}
+  const st=CA_STATUS_MAP[ca.status]||{l:ca.status,c:C.dm,icon:''};
+  const isActionable=ca.status==='pending'||ca.status==='revision_requested';
+  const isApproved=ca.status==='approved';
+  const borderColor=ca.status==='pending'?C.bdB:isApproved?C.ok+'50':ca.status==='revision_requested'?C.pu+'50':C.bd;
+  const title=subject||ca.campaign_name||meta.label;
+  function flash(m){setSaveMsg(m);setTimeout(()=>setSaveMsg(''),3000);}
+  // In-app article preview (renders the real content; works without WP login — WP drafts 404 for logged-out visitors).
+  function openArticlePreview(){
+    const esc=s=>String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+    const hero=mediaUrl?`<img src="${esc(mediaUrl)}" alt="" style="width:100%;max-height:420px;object-fit:cover;border-radius:8px;margin:0 0 24px"/>`:'';
+    const doc=`<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><style>body{font-family:Georgia,'Times New Roman',serif;color:#1a1a1a;background:#fff;max-width:760px;margin:0 auto;padding:40px 28px;line-height:1.7}h1{font-family:-apple-system,Segoe UI,Roboto,sans-serif;font-size:32px;line-height:1.25;margin:0 0 8px}.meta{color:#666;font-size:14px;font-style:italic;margin:0 0 24px}h2{font-family:-apple-system,Segoe UI,Roboto,sans-serif;font-size:23px;margin:32px 0 10px}h3{font-family:-apple-system,Segoe UI,Roboto,sans-serif;font-size:19px;margin:24px 0 8px}p{margin:0 0 16px}a{color:#0a66c2}img{max-width:100%;height:auto;border-radius:6px}ul,ol{margin:0 0 16px;padding-left:24px}li{margin:0 0 6px}</style></head><body><h1>${esc(subject)}</h1>${copyText?`<div class="meta">${esc(copyText)}</div>`:''}${hero}${bodyHtml||'<p style="color:#999">No article body yet.</p>'}</body></html>`;
+    setPreviewDoc({subject:subject||'Article preview',html:doc});
+  }
+
+  async function doSaveDraft(){setBusy(true);await onUpdate(ca.id,{subject:subject||ca.subject,full_content:buildFc({draft_saved:true}),...schedPatch()});flash('✓ Saved');setBusy(false);}
+  async function doApprove(){
+    setBusy(true);
+    const fcN=buildFc();const sp=schedPatch();
+    await onUpdate(ca.id,{status:'approved',approved_at:new Date().toISOString(),subject:subject||ca.subject,full_content:fcN,...sp});
+    const _v=validateForFire({...ca,status:'approved',content_type:ct,full_content:fcN,subject:subject||ca.subject,scheduled_for:sp.scheduled_for||ca.scheduled_for});
+    if(!_v.ok)alert((isPrint?"✅ Marked produced":"✅ Approved")+" — but it WON'T fire as-is:\n\n• "+_v.reasons.join("\n• ")+"\n\nResolve in the Flagged Issue folder.");
+    setBusy(false);
+  }
+  async function doReopen(){setBusy(true);await onUpdate(ca.id,{status:'pending',approved_at:null});setBusy(false);}
+  async function doConfirmReject(){
+    if(!rejectRemark.trim()&&!confirm('Reject without a reason?'))return;
+    setBusy(true);
+    await onUpdate(ca.id,{status:'skipped',full_content:{...fc,rejection_reason:rejectRemark}});
+    setRejectMode(false);setBusy(false);
+  }
+  async function doGenImage(){
+    const vp=fc.visualPrompt||fc.visual_prompt||'';
+    if(!vp.trim()){alert('No art direction (visualPrompt) on this item — set one in App 2 Card 3 first, or paste a media URL.');return;}
+    setGenning(true);
+    try{
+      const res=await fetch(`${N8N}/webhook/generate-preview`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({prompt:vp,aspect:isPrint?'3:4':'1:1'})});
+      const raw=await res.text();let data;try{data=JSON.parse(raw);}catch{throw new Error('Bad response: '+raw.slice(0,80));}
+      const url=data?.url||data?.image_url||data?.[0]?.url||'';
+      if(url){setMediaUrl(url);await onUpdate(ca.id,{full_content:buildFc({mediaUrl:url,mediaType:'image'})});flash('✓ Image generated — saved');}
+      else alert('Generator returned no URL.');
+    }catch(e){alert('Image generation failed: '+e.message);}
+    setGenning(false);
+  }
+  async function doPublishNow(){
+    if(!confirm(`Publish "${title}" live on WordPress now?`))return;
+    setPublishing(true);setPublishMsg('');
+    try{
+      const res=await fetch(`${N8N}/webhook/wp-publish-now`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ca_id:ca.id})});
+      const data=await res.json().catch(()=>({}));
+      const r=Array.isArray(data)?data[0]:data;
+      if(r&&r.ok){setPublishMsg('✓ Published live');onUpdate&&onUpdate(ca.id,{});}
+      else setPublishMsg('✗ '+(r&&r.error||'Publish failed — check Telegram'));
+    }catch(e){setPublishMsg('✗ '+e.message);}
+    setPublishing(false);
+  }
+
+  return html`<div style=${{background:C.s1,border:`0.5px solid ${borderColor}`,borderRadius:12,padding:16,marginBottom:14}}>
+    <div style=${{display:'flex',alignItems:'center',gap:8,marginBottom:10,flexWrap:'wrap'}}>
+      <span style=${{fontSize:11,fontWeight:700,color:meta.color,background:meta.color+'18',border:`0.5px solid ${meta.color}40`,borderRadius:6,padding:'2px 9px'}}>${meta.icon} ${meta.channel}</span>
+      <span style=${{color:C.tx,fontSize:14,fontWeight:600,flex:1,minWidth:120}}>${title}</span>
+      <span style=${{fontSize:11,fontWeight:700,color:st.c,background:st.c+'15',borderRadius:6,padding:'2px 9px'}}>${st.icon} ${st.l}</span>
+    </div>
+    ${ca.asset_code&&html`<div style=${{fontSize:10,color:C.mt,fontFamily:'ui-monospace,monospace',marginBottom:8,userSelect:'all'}} title="Lineage: client · brand · campaign · channel · touchpoint">🆔 ${ca.asset_code}</div>`}
+    ${(fc.visualPrompt||fc.visual_prompt)&&html`<div style=${{fontSize:10,color:C.dm,marginBottom:8,fontStyle:'italic'}}>🎨 ${(fc.visualPrompt||fc.visual_prompt).slice(0,160)}</div>`}
+    ${(Array.isArray(fc.slides)&&fc.slides.length)?html`<div style=${{marginBottom:10}}>
+      <div style=${{fontSize:11,color:C.pu,fontWeight:600,marginBottom:6}}>🎠 ${fc.slides.length}-slide carousel${fc.slideCount&&fc.slideCount<fc.slides.length?` · ${fc.slideCount} with images`:''}</div>
+      <div style=${{display:'flex',gap:8,overflowX:'auto',paddingBottom:4}}>
+        ${fc.slides.map((s,si)=>html`<div key=${si} style=${{flex:'0 0 auto',width:120}}>
+          ${s.imageUrl?html`<img src=${s.imageUrl} style=${{width:120,height:120,objectFit:'cover',borderRadius:6,border:`0.5px solid ${C.bd}`}}/>`:html`<div style=${{width:120,height:120,borderRadius:6,border:`1px dashed ${C.er}55`,display:'flex',alignItems:'center',justifyContent:'center',color:C.er,fontSize:10,textAlign:'center'}}>slide ${si+1}<br/>no image</div>`}
+          ${s.headline?html`<div style=${{fontSize:10,color:C.dm,marginTop:4,lineHeight:1.3}}>${s.headline.slice(0,50)}</div>`:''}
+        </div>`)}
+      </div>
+    </div>`
+    :mediaUrl&&html`<div style=${{marginBottom:10}}>${(fc.mediaType==='video')
+      ?html`<video src=${mediaUrl} controls style=${{maxWidth:'100%',maxHeight:240,borderRadius:8,border:`0.5px solid ${C.bd}`}}></video>`
+      :html`<img src=${mediaUrl} style=${{maxWidth:'100%',maxHeight:240,borderRadius:8,border:`0.5px solid ${C.bd}`,objectFit:'contain'}}/>`}</div>`}
+
+    ${isActionable?html`<div>
+      ${isBlog&&html`<input value=${subject} onChange=${e=>setSubject(e.target.value)} placeholder="Post title" style=${{width:'100%',boxSizing:'border-box',background:C.s2,border:`0.5px solid ${C.bd}`,borderRadius:6,color:C.tx,padding:'8px 10px',fontSize:13,marginBottom:8,outline:'none'}}/>`}
+      <textarea value=${copyText} onChange=${e=>setCopyText(e.target.value)} placeholder=${isBlog?'Excerpt / summary copy':'Copy / caption'} rows=${isBlog?3:5}
+        style=${{width:'100%',boxSizing:'border-box',background:C.s2,border:`0.5px solid ${C.bd}`,borderRadius:6,color:C.tx,padding:'8px 10px',fontSize:13,outline:'none',resize:'vertical',fontFamily:'inherit'}}></textarea>
+      ${isBlog&&html`<textarea value=${bodyHtml} onChange=${e=>setBodyHtml(e.target.value)} placeholder="Full body HTML (the article)" rows=${6}
+        style=${{width:'100%',boxSizing:'border-box',background:C.s2,border:`0.5px solid ${C.bd}`,borderRadius:6,color:C.tx,padding:'8px 10px',fontSize:12,outline:'none',resize:'vertical',marginTop:8,fontFamily:'monospace'}}></textarea>`}
+      <div style=${{display:'flex',gap:8,alignItems:'center',marginTop:8,flexWrap:'wrap'}}>
+        <input value=${mediaUrl} onChange=${e=>setMediaUrl(e.target.value)} placeholder="Media URL (image/video)" style=${{flex:1,minWidth:160,background:C.s2,border:`0.5px solid ${C.bd}`,borderRadius:6,color:C.tx,padding:'7px 10px',fontSize:12,outline:'none'}}/>
+        <button onClick=${doGenImage} disabled=${genning} style=${{background:C.s3,color:C.pu,border:`0.5px solid ${C.pu}40`,borderRadius:6,padding:'7px 12px',fontSize:11,cursor:'pointer',whiteSpace:'nowrap'}}>${genning?'…generating':'✨ Generate from art direction'}</button>
+      </div>
+      ${!isPrint&&html`<div style=${{display:'flex',gap:8,alignItems:'center',marginTop:8}}>
+        <span style=${{fontSize:11,color:C.dm}}>Schedule (MYT)</span>
+        <input type="date" value=${schedDate} onChange=${e=>setSchedDate(e.target.value)} style=${{background:C.s2,border:`0.5px solid ${C.bd}`,borderRadius:6,color:C.tx,padding:'5px 8px',fontSize:12,outline:'none'}}/>
+        <input type="time" value=${schedTime} onChange=${e=>setSchedTime(e.target.value)} style=${{background:C.s2,border:`0.5px solid ${C.bd}`,borderRadius:6,color:C.tx,padding:'5px 8px',fontSize:12,outline:'none'}}/>
+      </div>`}
+      <div style=${{display:'flex',gap:8,marginTop:12,flexWrap:'wrap'}}>
+        <button onClick=${doSaveDraft} disabled=${busy} style=${{background:C.s3,color:C.dm,border:`0.5px solid ${C.bd}`,borderRadius:7,padding:'7px 16px',fontSize:12,cursor:'pointer'}}>💾 Save as Draft</button>
+        <button onClick=${doApprove} disabled=${busy} style=${{background:'rgba(52,211,153,0.12)',color:C.ok,border:`0.5px solid ${C.ok}55`,borderRadius:7,padding:'7px 16px',fontSize:12,fontWeight:700,cursor:'pointer'}}>${isPrint?'✓ Mark Produced':'✓ Save & Approve'}</button>
+        ${mediaUrl&&html`<a href=${mediaUrl} target="_blank" download style=${{background:'transparent',color:C.tl,border:`0.5px solid ${C.tl}40`,borderRadius:7,padding:'7px 16px',fontSize:12,cursor:'pointer',textDecoration:'none'}}>⬇ Download</a>`}
+        <button onClick=${()=>setRejectMode(!rejectMode)} style=${{background:'transparent',color:C.er,border:`0.5px solid ${C.er}40`,borderRadius:7,padding:'7px 16px',fontSize:12,cursor:'pointer'}}>✗ Reject</button>
+        <button onClick=${()=>onDelete(ca.id)} style=${{background:'transparent',color:C.mt,border:`0.5px solid ${C.bd}`,borderRadius:7,padding:'7px 12px',fontSize:12,cursor:'pointer'}}>🗑</button>
+        ${saveMsg&&html`<span style=${{color:C.ok,fontSize:11,alignSelf:'center'}}>${saveMsg}</span>`}
+      </div>
+      ${rejectMode&&html`<div style=${{marginTop:10}}>
+        <textarea value=${rejectRemark} onChange=${e=>setRejectRemark(e.target.value)} placeholder="Why rejected? (kept for the AI rewrite)" rows=${2} style=${{width:'100%',boxSizing:'border-box',background:C.s2,border:`0.5px solid ${C.er}40`,borderRadius:6,color:C.tx,padding:'8px 10px',fontSize:12,outline:'none',resize:'vertical'}}></textarea>
+        <button onClick=${doConfirmReject} disabled=${busy} style=${{marginTop:6,background:'rgba(248,113,113,0.15)',color:C.er,border:`0.5px solid ${C.er}55`,borderRadius:6,padding:'6px 14px',fontSize:12,cursor:'pointer'}}>Confirm Reject</button>
+      </div>`}
+    </div>`:html`<div>
+      ${(isBlog&&(bodyHtml||copyText))&&html`<div style=${{background:C.s2,border:`0.5px solid ${C.pu}40`,borderRadius:8,padding:'10px 12px',marginBottom:10,display:'flex',gap:10,alignItems:'center',flexWrap:'wrap'}}>
+        <button onClick=${openArticlePreview} style=${{background:`${C.pu}1a`,color:C.pu,border:`0.5px solid ${C.pu}55`,borderRadius:6,padding:'6px 14px',fontSize:12,fontWeight:700,cursor:'pointer'}}>👁 Preview article</button>
+        ${ca.status==='published'&&fc.wp_link&&html`<a href=${fc.wp_link} target="_blank" style=${{color:C.tl,fontSize:11,textDecoration:'none'}}>🔗 view live article →</a>`}
+      </div>`}
+      ${copyText&&html`<div style=${{color:C.tx,fontSize:13,whiteSpace:'pre-wrap',marginBottom:8}}>${copyText.slice(0,400)}${copyText.length>400?'…':''}</div>`}
+      <div style=${{display:'flex',gap:8,alignItems:'center',flexWrap:'wrap'}}>
+        ${!isPrint&&html`<span style=${{fontSize:11,color:C.dm}}>${ca.scheduled_for?'📅 '+fmtDay(ca.scheduled_for):'no schedule'}</span>`}
+        ${isApproved&&html`<button onClick=${doReopen} disabled=${busy} style=${{background:'transparent',color:C.pu,border:`0.5px solid ${C.pu}40`,borderRadius:6,padding:'5px 14px',fontSize:11,cursor:'pointer'}}>↩ Re-open for Revision</button>`}
+        ${mediaUrl&&html`<a href=${mediaUrl} target="_blank" download style=${{color:C.tl,fontSize:11,textDecoration:'none',border:`0.5px solid ${C.tl}40`,borderRadius:6,padding:'5px 12px'}}>⬇ Download</a>`}
+        ${ca.status==='published'&&onArchive&&html`<button onClick=${()=>onArchive(ca)} style=${{background:'rgba(45,212,191,0.12)',color:C.tl,border:`0.5px solid ${C.tl}55`,borderRadius:6,padding:'5px 12px',fontSize:11,fontWeight:600,cursor:'pointer'}}>📦 Archive</button>`}
+        <button onClick=${()=>{if(confirm('Permanently DELETE this item now? It will NOT be archived — this cannot be undone.'))onDelete(ca.id);}} style=${{background:'transparent',color:C.er,border:`0.5px solid ${C.er}40`,borderRadius:6,padding:'5px 12px',fontSize:11,cursor:'pointer'}}>🗑 Delete</button>
+      </div>
+    </div>`}
+    ${previewDoc?html`<div onClick=${()=>setPreviewDoc(null)} style=${{position:'fixed',inset:0,background:'rgba(0,0,0,0.72)',zIndex:1000,display:'flex',alignItems:'center',justifyContent:'center',padding:20}}>
+      <div onClick=${e=>e.stopPropagation()} style=${{background:'#fff',borderRadius:10,width:'100%',maxWidth:800,height:'88vh',display:'flex',flexDirection:'column',overflow:'hidden'}}>
+        <div style=${{padding:'10px 16px',background:C.s1,display:'flex',justifyContent:'space-between',alignItems:'center',gap:10,flexShrink:0}}>
+          <span style=${{color:C.tx,fontSize:13,fontWeight:600,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>👁 Article preview — ${previewDoc.subject}</span>
+          <button onClick=${()=>setPreviewDoc(null)} style=${{background:'transparent',color:C.dm,border:`0.5px solid ${C.bd}`,borderRadius:6,padding:'4px 12px',fontSize:12,cursor:'pointer',flexShrink:0}}>✕ Close</button>
+        </div>
+        <iframe srcDoc=${previewDoc.html} sandbox="" style=${{flex:1,border:'none',width:'100%',background:'#fff'}} title="Article preview"/>
+      </div>
+    </div>`:''}
+  </div>`;
+}
+
 function SocialCaptionCard({ca,onUpdate,onDelete}){
   const captionInit=ca.full_content?.caption||ca.preview_text||'';
   const[copyText,setCopyText]=useState(captionInit);
@@ -1178,6 +1369,7 @@ function SocialCaptionCard({ca,onUpdate,onDelete}){
     </div>
 
     <div style=${{padding:'14px 16px'}}>
+      ${ca.asset_code&&html`<div style=${{fontSize:10,color:C.mt,fontFamily:'ui-monospace,monospace',marginBottom:10,userSelect:'all'}} title="Lineage: client · brand · campaign · channel · touchpoint">🆔 ${ca.asset_code}</div>`}
       ${isActionable
         ?html`<div>
 
@@ -1488,6 +1680,7 @@ function EmailCard({ca,onUpdate,onDelete}){
     </div>
 
     <div style=${{padding:'14px 16px'}}>
+      ${ca.asset_code&&html`<div style=${{fontSize:10,color:C.mt,fontFamily:'ui-monospace,monospace',marginBottom:10,userSelect:'all'}} title="Lineage: client · brand · campaign · channel · touchpoint">🆔 ${ca.asset_code}</div>`}
       ${isActionable
         ?html`<div>
           <!-- SUBJECT -->
@@ -1854,12 +2047,21 @@ const CA_STATUS_MAP={
   revision_requested:{l:'Revision',  c:'#a78bfa',icon:'✏️'},
   awaiting_revision: {l:'In Revision',c:'#a78bfa',icon:'✏️'},
   held:        {l:'On Hold',         c:'#5a8ab0',icon:'⏸'},
+  draft_ready: {l:'Draft Ready',     c:'#a78bfa',icon:'📝'},
+  publishing:  {l:'Publishing…',     c:'#fbbf24',icon:'⏳'},
 };
 const CAMPAIGN_META={
   email:      {icon:'📧',label:'TDOW Email',     campaign:'TDOW Email Series',        channel:'📧 Email Blast',            color:'#4a86f5'},
   social:     {icon:'📸',label:'TDOW Social',    campaign:'TDOW Social Series',       channel:'📸 Instagram · 📘 Facebook', color:'#fb923c'},
   real_gains: {icon:'🏓',label:'Real Gains',     campaign:'Real Gains w/ Titan',      channel:'📸 Instagram · 📘 Facebook', color:'#2dd4bf'},
+  // Canonical new channels (content_type = publishing medium) emitted by App 2 Card 3
+  tiktok:     {icon:'🎵',label:'TikTok',         campaign:'TikTok',                   channel:'🎵 TikTok',                  color:'#f472b6'},
+  blog:       {icon:'📝',label:'Blog / SEO',     campaign:'Blog / SEO',               channel:'📝 WordPress Blog',          color:'#a78bfa'},
+  google:     {icon:'🔍',label:'Google',         campaign:'Google',                   channel:'🔍 Google',                  color:'#34d399'},
+  print:      {icon:'🖨️',label:'Print',          campaign:'Print',                    channel:'🖨️ Print (download)',        color:'#fbbf24'},
 };
+// Mediums that are produce-and-download only — never scheduled or auto-fired.
+const PRODUCE_ONLY=new Set(['print']);
 // Two-level campaign filter config
 const CAMP_L1=[
   {k:'all',        l:'All Campaigns', color:'#4a86f5'},
@@ -2164,6 +2366,7 @@ function App(){
   const[filterStatus,setFilterStatus]=useState('pending_review');
   const[filterClient,setFilterClient]=useState('all');
   const[filterCampaign,setFilterCampaign]=useState('all');
+  const[filterChannel,setFilterChannel]=useState('all');
   const[lastRefresh,setLastRefresh]=useState(null);
   const[schedule,setSchedule]=useState([]);
   const[rgSchedule,setRgSchedule]=useState({});
@@ -2172,11 +2375,12 @@ function App(){
   const[schedClientMap,setSchedClientMap]=useState({});
   const[socialCAs,setSocialCAs]=useState([]);
   const[emailCAs,setEmailCAs]=useState([]);
+  const[extraCAs,setExtraCAs]=useState([]);
 
   const loadData=useCallback(async(silent=false)=>{
     if(!silent)setLoading(true);
-    const[q,c,m,sched,deps,arc,socCAs,emCAs]=await Promise.all([db.getQueue(),db.getClients(),db.getMediaAssets(),db.getContentSchedule(),db.getDeployments(),db.getArchive(),db.getSocialCAs(),db.getEmailCAs()]);
-    setCopyItems(q);setClients(c);setMediaAssets(m);setSchedule(sched);setDeployments(deps);setArchive(arc);setSocialCAs(socCAs);setEmailCAs(emCAs);
+    const[q,c,m,sched,deps,arc,socCAs,emCAs,xtCAs]=await Promise.all([db.getQueue(),db.getClients(),db.getMediaAssets(),db.getContentSchedule(),db.getDeployments(),db.getArchive(),db.getSocialCAs(),db.getEmailCAs(),db.getExtraCAs()]);
+    setCopyItems(q);setClients(c);setMediaAssets(m);setSchedule(sched);setDeployments(deps);setArchive(arc);setSocialCAs(socCAs);setEmailCAs(emCAs);setExtraCAs(xtCAs);
     // Build week-number + scheduled_for map keyed by campaign_asset id (for Real Gains)
     const rgMap={};
     sched.filter(s=>s.content_type==='real_gains').forEach(s=>{
@@ -2244,6 +2448,22 @@ function App(){
     await db.deleteCA(id);
     setSocialCAs(prev=>prev.filter(ca=>ca.id!==id));
   }
+  async function handleExtraCAUpdate(id,patch){
+    await db.updateSocialCA(id,patch);
+    setExtraCAs(prev=>prev.map(ca=>ca.id===id?{...ca,...patch}:ca));
+  }
+  async function handleExtraCADelete(id){
+    await db.deleteCA(id);
+    setExtraCAs(prev=>prev.filter(ca=>ca.id!==id));
+  }
+  // Published → Archive: snapshot to content_archive then remove the row (works for any CA type).
+  async function handleCAArchive(ca){
+    if(!confirm(`Archive "${ca.subject||'this item'}"? It moves to the Archive folder (still purgeable there).`))return;
+    try{await db.archiveCA(ca);
+      setSocialCAs(p=>p.filter(x=>x.id!==ca.id));setEmailCAs(p=>p.filter(x=>x.id!==ca.id));setExtraCAs(p=>p.filter(x=>x.id!==ca.id));
+      setArchive(await db.getArchive());
+    }catch(e){alert('Archive failed: '+e.message);}
+  }
   async function handleBulkApproveEmail(list){
     const pending=(list||emailCAs).filter(ca=>ca.status==='pending');
     if(!pending.length)return;
@@ -2310,20 +2530,25 @@ function App(){
   socialCAs.forEach(ca=>{const k=CA_TO_STATUS[ca.status];if(k)soCACounts[k]=(soCACounts[k]||0)+1;});
   const emCACounts={all:emailCAs.length,pending_review:0,approved:0,rejected:0,published:0,revision_requested:0,generating:0};
   emailCAs.forEach(ca=>{const k=CA_TO_STATUS[ca.status];if(k)emCACounts[k]=(emCACounts[k]||0)+1;});
+  const exCACounts={all:extraCAs.length,pending_review:0,approved:0,rejected:0,published:0,revision_requested:0,generating:0};
+  extraCAs.forEach(ca=>{const k=CA_TO_STATUS[ca.status];if(k)exCACounts[k]=(exCACounts[k]||0)+1;});
   // Combined counts for Content tab
-  const contentCounts={all:copyItems.length+mediaAssets.length+socialCAs.length+emailCAs.length};
-  Object.keys(STATUS).forEach(s=>{contentCounts[s]=(copyCounts[s]||0)+(mediaCounts[s]||0)+(soCACounts[s]||0)+(emCACounts[s]||0);});
-  // Scheduled = approved content that has a scheduled_for (queued to go out) AND passes the integrity check
-  contentCounts['scheduled']=[...socialCAs,...emailCAs].filter(c=>c.status==='approved'&&c.scheduled_for&&validateForFire(c).ok).length+mediaAssets.filter(a=>a.status==='approved'&&rgSchedule[a.id]&&rgSchedule[a.id].scheduled_for&&rgSchedule[a.id].fireValid).length;
+  const contentCounts={all:copyItems.length+mediaAssets.length+socialCAs.length+emailCAs.length+extraCAs.length};
+  Object.keys(STATUS).forEach(s=>{contentCounts[s]=(copyCounts[s]||0)+(mediaCounts[s]||0)+(soCACounts[s]||0)+(emCACounts[s]||0)+(exCACounts[s]||0);});
+  // Scheduled = approved content that has a scheduled_for (queued to go out) AND passes the integrity check.
+  // Print is produce-only — it never enters Scheduled.
+  contentCounts['scheduled']=[...socialCAs,...emailCAs,...extraCAs].filter(c=>!PRODUCE_ONLY.has(c.content_type)&&c.status==='approved'&&c.scheduled_for&&validateForFire(c).ok).length+mediaAssets.filter(a=>a.status==='approved'&&rgSchedule[a.id]&&rgSchedule[a.id].scheduled_for&&rgSchedule[a.id].fireValid).length;
   // Real Gains has no human title column — derive "Wk N: Topic" from data.{week,topic}; fall back to slug only if absent.
   const rgTitle=(a)=>{const wk=a?.data?.week??rgSchedule[a?.id]?.week_number;const topic=a?.data?.topic;if(topic)return wk?`Wk${wk}: ${topic}`:topic;return a?.asset_name||a?.campaign_name||'Real Gains post';};
   // Flagged Issue = approved but FAILS the integrity check — held out of Schedule until resolved (🛠 system self-heals · ⚠️ needs you)
   const flaggedList=[
     ...socialCAs.filter(c=>c.status==='approved'&&!validateForFire(c).ok).map(c=>({id:c.id,kind:'social',label:'📸 TDOW Social',title:c.subject||('Wk'+c.week_number),when:c.scheduled_for,v:validateForFire(c)})),
     ...emailCAs.filter(c=>c.status==='approved'&&!validateForFire(c).ok).map(c=>({id:c.id,kind:'email',label:'📧 Email',title:c.subject||('Wk'+c.week_number),when:c.scheduled_for,v:validateForFire(c)})),
+    // New canonical channels (print excluded — produce-only, never fires).
+    ...extraCAs.filter(c=>!PRODUCE_ONLY.has(c.content_type)&&c.status==='approved'&&!validateForFire(c).ok).map(c=>{const m=CAMPAIGN_META[c.content_type]||{icon:'📄',channel:c.content_type};return{id:c.id,kind:c.content_type,label:`${m.icon} ${m.channel}`,title:c.subject||c.campaign_name||c.content_type,when:c.scheduled_for,v:validateForFire(c)};}),
     ...mediaAssets.filter(a=>a.status==='approved'&&rgSchedule[a.id]&&!rgSchedule[a.id].fireValid).map(a=>({id:a.id,kind:'real_gains',label:'🏓 Real Gains',title:rgTitle(a),when:rgSchedule[a.id]?.scheduled_for,v:{ok:false,hard:(rgSchedule[a.id]?.fireReasons||[]).map(r=>({reason:r,cls:/copy|caption|image|subject/i.test(r)?'human':'system'})),reasons:rgSchedule[a.id]?.fireReasons||[]}})),
     // Items mid-publish that didn't confirm = the send FAILED — never shown as Published; surfaced here to fix/retry.
-    ...[...socialCAs,...emailCAs].filter(c=>isStuckPub(c.status,c.updated_at)).map(c=>({id:c.id,kind:c.content_type,label:c.content_type==='email'?'📧 Email':'📸 TDOW Social',title:c.subject||('Wk'+c.week_number),when:c.scheduled_for,v:{ok:false,hard:[{reason:'publish didn’t complete — the send failed. Re-open & re-approve to retry.',cls:'system'}],reasons:['publish failed']}})),
+    ...[...socialCAs,...emailCAs,...extraCAs].filter(c=>isStuckPub(c.status,c.updated_at)).map(c=>{const m=CAMPAIGN_META[c.content_type]||{icon:'📄',channel:c.content_type};return{id:c.id,kind:c.content_type,label:c.content_type==='email'?'📧 Email':c.content_type==='social'?'📸 TDOW Social':`${m.icon} ${m.channel}`,title:c.subject||('Wk'+c.week_number),when:c.scheduled_for,v:{ok:false,hard:[{reason:'publish didn’t complete — the send failed. Re-open & re-approve to retry.',cls:'system'}],reasons:['publish failed']}};}),
     ...mediaAssets.filter(a=>rgSchedule[a.id]&&isStuckPub(rgSchedule[a.id].ca_status,rgSchedule[a.id].updated_at)).map(a=>({id:a.id,kind:'real_gains',label:'🏓 Real Gains',title:rgTitle(a),when:rgSchedule[a.id]?.scheduled_for,v:{ok:false,hard:[{reason:'publish didn’t complete — the post failed. Re-open & re-approve to retry.',cls:'system'}],reasons:['publish failed']}})),
   ];
   contentCounts['flagged']=flaggedList.length;
@@ -2334,6 +2559,16 @@ function App(){
     if(asset.channel==='email')return'email';
     return'social';
   };
+  // ── Campaign key + media-channel helpers (Row3 campaign chips by campaign_id; Row4 channel chips) ──
+  // Legacy Titan series have no campaign_id → fall back to a stable legacy key so they still get a chip.
+  const caCampKey=ca=>ca.campaign_id||(ca.content_type==='social'?'tdow_social':ca.content_type==='email'?'tdow_email':ca.content_type);
+  const mediaCampKey=a=>rgSchedule[a.id]?'real_gains':(a.campaign_id||assetCampaign(a));
+  const LEGACY_CAMP={tdow_social:'📸 TDOW Social',tdow_email:'📧 TDOW Email',real_gains:'🏓 Real Gains',social:'📸 TDOW Social',email:'📧 TDOW Email'};
+  const campLabelFor=(key,sample)=>LEGACY_CAMP[key]||sample||key;
+  // Channels a piece posts to (a social/real_gains CA targets BOTH IG + FB, so it appears under both chips).
+  const caChannels=ca=>{const ct=ca.content_type;return ct==='social'?['instagram','facebook']:ct==='email'?['email']:[ct];};
+  const mediaChannels=a=>rgSchedule[a.id]?['instagram','facebook']:(a.channel==='email'?['email']:['instagram','facebook']);
+  const CH_CHIP={instagram:{l:'📸 Instagram',c:'#e1306c'},facebook:{l:'📘 Facebook',c:'#1877f2'},email:{l:'📧 Email',c:'#4a86f5'},blog:{l:'📝 Website Blog',c:'#a78bfa'},google:{l:'🔍 Google/SEO',c:'#34a853'},tiktok:{l:'🎵 TikTok',c:'#69c9d0'},print:{l:'🖨 Print',c:'#94a3b8'},whatsapp:{l:'💬 WhatsApp',c:'#25d366'},linkedin:{l:'💼 LinkedIn',c:'#0a66c2'}};
 
   const filteredCopy=copyItems.filter(item=>{
     if(filterStatus!=='all'&&item.status!==filterStatus)return false;
@@ -2341,14 +2576,26 @@ function App(){
     return true;
   });
   const filteredSocialCAs=socialCAs.filter(ca=>{
-    if(filterCampaign!=='all'&&filterCampaign!=='social')return false;
+    if(filterCampaign!=='all'&&caCampKey(ca)!==filterCampaign)return false;
+    if(filterChannel!=='all'&&!caChannels(ca).includes(filterChannel))return false;
+    if(filterClient!=='all'&&ca.client_id&&ca.client_id!==filterClient)return false;
     if(filterStatus==='flagged')return isStuckPub(ca.status,ca.updated_at)||(ca.status==='approved'&&!validateForFire(ca).ok);
     if(filterStatus!=='all'&&CA_TO_STATUS[ca.status]!==filterStatus)return false;
     return true;
   });
   const filteredEmailCAs=emailCAs.filter(ca=>{
-    if(filterCampaign!=='all'&&filterCampaign!=='email')return false;
+    if(filterCampaign!=='all'&&caCampKey(ca)!==filterCampaign)return false;
+    if(filterChannel!=='all'&&!caChannels(ca).includes(filterChannel))return false;
+    if(filterClient!=='all'&&ca.client_id&&ca.client_id!==filterClient)return false;
     if(filterStatus==='flagged')return isStuckPub(ca.status,ca.updated_at)||(ca.status==='approved'&&!validateForFire(ca).ok);
+    if(filterStatus!=='all'&&CA_TO_STATUS[ca.status]!==filterStatus)return false;
+    return true;
+  });
+  const filteredExtraCAs=extraCAs.filter(ca=>{
+    if(filterCampaign!=='all'&&caCampKey(ca)!==filterCampaign)return false;
+    if(filterChannel!=='all'&&!caChannels(ca).includes(filterChannel))return false;
+    if(filterClient!=='all'&&ca.client_id&&ca.client_id!==filterClient)return false;
+    if(filterStatus==='flagged')return !PRODUCE_ONLY.has(ca.content_type)&&(isStuckPub(ca.status,ca.updated_at)||(ca.status==='approved'&&!validateForFire(ca).ok));
     if(filterStatus!=='all'&&CA_TO_STATUS[ca.status]!==filterStatus)return false;
     return true;
   });
@@ -2356,7 +2603,8 @@ function App(){
     if(filterStatus==='flagged'){ const rg=rgSchedule[asset.id]; if(!((rg&&isStuckPub(rg.ca_status,rg.updated_at))||(asset.status==='approved'&&rg&&!rg.fireValid)))return false; }
     else if(filterStatus!=='all'&&asset.status!==filterStatus)return false;
     if(filterClient!=='all'&&asset.client_id!==filterClient)return false;
-    if(filterCampaign!=='all'&&assetCampaign(asset)!==filterCampaign)return false;
+    if(filterCampaign!=='all'&&mediaCampKey(asset)!==filterCampaign)return false;
+    if(filterChannel!=='all'&&!mediaChannels(asset).includes(filterChannel))return false;
     return true;
   }).sort((a,b)=>{
     // Sort by week_number for Real Gains (most urgent first), then by created_at
@@ -2377,14 +2625,33 @@ function App(){
   const showFilters=activeTab==='content';
   const pendingArchiveCleanup=mediaAssets.filter(a=>a.status==='published'||a.status==='rejected').length;
 
+  // ── Row3 (campaign) + Row4 (channel) chip derivation from all loaded content ──
+  const _allItems=[
+    ...socialCAs.map(c=>({campKey:caCampKey(c),campLabel:campLabelFor(caCampKey(c),c.campaign_name),channels:caChannels(c),bucket:CA_TO_STATUS[c.status]||'',clientId:c.client_id||null})),
+    ...emailCAs.map(c=>({campKey:caCampKey(c),campLabel:campLabelFor(caCampKey(c),c.campaign_name),channels:caChannels(c),bucket:CA_TO_STATUS[c.status]||'',clientId:c.client_id||null})),
+    ...extraCAs.map(c=>({campKey:caCampKey(c),campLabel:campLabelFor(caCampKey(c),c.campaign_name),channels:caChannels(c),bucket:CA_TO_STATUS[c.status]||'',clientId:c.client_id||null})),
+    ...mediaAssets.map(a=>({campKey:mediaCampKey(a),campLabel:campLabelFor(mediaCampKey(a),a.campaign_name),channels:mediaChannels(a),bucket:a.status||'',clientId:a.client_id||null})),
+  ];
+  const _clientOk=it=>filterClient==='all'||!it.clientId||it.clientId===filterClient;
+  const _statusOk=it=>filterStatus==='all'||filterStatus==='flagged'||it.bucket===filterStatus;
+  const _channelOk=it=>filterChannel==='all'||it.channels.includes(filterChannel);
+  const _campOk=it=>filterCampaign==='all'||it.campKey===filterCampaign;
+  // Row3 = ACTIVE campaigns (anything not yet published), client-scoped; count respects channel+status filters
+  const campChips=(()=>{const m=new Map();_allItems.filter(it=>it.bucket!=='published'&&_clientOk(it)).forEach(it=>{if(!m.has(it.campKey))m.set(it.campKey,{k:it.campKey,l:it.campLabel,n:0});});_allItems.filter(it=>_clientOk(it)&&_channelOk(it)&&_statusOk(it)).forEach(it=>{const e=m.get(it.campKey);if(e)e.n++;});return [...m.values()];})();
+  const campAllCount=_allItems.filter(it=>_clientOk(it)&&_channelOk(it)&&_statusOk(it)).length;
+  // Row4 = media channels present, client+campaign scoped
+  const chanChips=(()=>{const m=new Map();_allItems.filter(it=>_clientOk(it)&&_campOk(it)).forEach(it=>it.channels.forEach(ch=>{if(!m.has(ch))m.set(ch,{k:ch,n:0});}));_allItems.filter(it=>_clientOk(it)&&_campOk(it)&&_statusOk(it)).forEach(it=>it.channels.forEach(ch=>{const e=m.get(ch);if(e)e.n++;}));return [...m.values()].sort((a,b)=>b.n-a.n);})();
+  const chanAllCount=_allItems.filter(it=>_clientOk(it)&&_campOk(it)&&_statusOk(it)).length;
+
   // ── Scheduled view: unified table of what's queued to go out (approved + scheduled_for), earliest → latest ──
   const fmtSched=d=>d?new Date(d).toLocaleString('en-MY',{day:'numeric',month:'short',year:'numeric',hour:'2-digit',minute:'2-digit',timeZone:'Asia/Kuala_Lumpur'}):'—';
   const fmtDay=d=>d?new Date(d).toLocaleDateString('en-MY',{weekday:'short',timeZone:'Asia/Kuala_Lumpur'}):'';
   const scheduledRows=[
-    ...socialCAs.filter(c=>c.status==='approved'&&c.scheduled_for&&validateForFire(c).ok).map(c=>({id:c.id,date:c.scheduled_for,ck:'social',campaign:'TDOW Social',title:c.subject||'Social post',platform:'📸 IG · 📘 FB',clientId:null})),
-    ...emailCAs.filter(c=>c.status==='approved'&&c.scheduled_for&&validateForFire(c).ok).map(c=>({id:c.id,date:c.scheduled_for,ck:'email',campaign:c.full_content?.seriesName||(c.week_number?'TDOW Email':'Email'),title:c.subject||'Email',platform:'📧 Email',clientId:null})),
-    ...mediaAssets.filter(a=>a.status==='approved'&&rgSchedule[a.id]&&rgSchedule[a.id].scheduled_for&&rgSchedule[a.id].fireValid).map(a=>({id:a.id,date:rgSchedule[a.id].scheduled_for,ck:'real_gains',campaign:'Real Gains',title:rgTitle(a),platform:'📸 IG · 📘 FB',clientId:a.client_id})),
-  ].filter(r=>(filterCampaign==='all'||r.ck===filterCampaign)&&(filterClient==='all'||!r.clientId||r.clientId===filterClient))
+    ...socialCAs.filter(c=>c.status==='approved'&&c.scheduled_for&&validateForFire(c).ok).map(c=>({id:c.id,date:c.scheduled_for,ck:caCampKey(c),channels:caChannels(c),campaign:campLabelFor(caCampKey(c),c.campaign_name),title:c.subject||'Social post',platform:'📸 IG · 📘 FB',clientId:c.client_id||null,code:c.asset_code||null})),
+    ...emailCAs.filter(c=>c.status==='approved'&&c.scheduled_for&&validateForFire(c).ok).map(c=>({id:c.id,date:c.scheduled_for,ck:caCampKey(c),channels:caChannels(c),campaign:campLabelFor(caCampKey(c),c.campaign_name||c.full_content?.seriesName),title:c.subject||'Email',platform:'📧 Email',clientId:c.client_id||null,code:c.asset_code||null})),
+    ...mediaAssets.filter(a=>a.status==='approved'&&rgSchedule[a.id]&&rgSchedule[a.id].scheduled_for&&rgSchedule[a.id].fireValid).map(a=>({id:a.id,date:rgSchedule[a.id].scheduled_for,ck:mediaCampKey(a),channels:mediaChannels(a),campaign:'Real Gains',title:rgTitle(a),platform:'📸 IG · 📘 FB',clientId:a.client_id,code:a.asset_code||null})),
+    ...extraCAs.filter(c=>!PRODUCE_ONLY.has(c.content_type)&&c.status==='approved'&&c.scheduled_for&&validateForFire(c).ok).map(c=>{const m=CAMPAIGN_META[c.content_type]||{channel:c.content_type};return{id:c.id,date:c.scheduled_for,ck:caCampKey(c),channels:caChannels(c),campaign:c.campaign_name||m.label||c.content_type,title:c.subject||c.campaign_name||c.content_type,platform:m.channel,clientId:c.client_id||null,code:c.asset_code||null};}),
+  ].filter(r=>(filterCampaign==='all'||r.ck===filterCampaign)&&(filterChannel==='all'||r.channels.includes(filterChannel))&&(filterClient==='all'||!r.clientId||r.clientId===filterClient))
    .sort((a,b)=>new Date(a.date)-new Date(b.date));
   const scheduledTableHtml=html`<div>
     <div style=${{display:'flex',alignItems:'center',gap:8,marginBottom:12}}>
@@ -2400,7 +2667,10 @@ function App(){
         <div style=${{color:C.tx}}>${fmtSched(r.date)}</div>
         <div style=${{color:fmtDay(r.date)==='Tue'?'#4a86f5':fmtDay(r.date)==='Wed'?'#fb923c':fmtDay(r.date)==='Fri'?'#34d399':C.dm,fontWeight:600}}>${fmtDay(r.date)}</div>
         <div style=${{color:C.dm}}>${r.campaign}</div>
-        <div style=${{color:C.tx,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap',paddingRight:8}}>${r.title}</div>
+        <div style=${{overflow:'hidden',paddingRight:8}}>
+          <div style=${{color:C.tx,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>${r.title}</div>
+          ${r.code&&html`<div style=${{color:C.mt,fontSize:9.5,fontFamily:'ui-monospace,monospace',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>🆔 ${r.code}</div>`}
+        </div>
         <div style=${{color:C.dm,fontSize:11}}>${r.platform}</div>
       </div>`)}
     </div>`}
@@ -2445,44 +2715,17 @@ function App(){
         </button>
       </div>
 
-      <!-- Stats row (Content tab only) -->
+      <!-- Filters (Content tab only) — Row-2 stat cards removed (redundant with the status chips below) -->
       ${showFilters&&html`<div>
-        <div style=${{display:'flex',gap:10,marginBottom:16,flexWrap:'wrap'}}>
-          ${Object.entries(STATUS).map(([k,cfg])=>html`<div key=${k} style=${{background:C.s1,border:`0.5px solid ${counts[k]>0?cfg.c+'50':C.bd}`,borderRadius:8,padding:'10px 16px',textAlign:'center',minWidth:90,flex:1}}>
-            <div style=${{fontSize:20,fontWeight:700,color:counts[k]>0?cfg.c:C.mt}}>${counts[k]||0}</div>
-            <div style=${{fontSize:10,color:C.dm,textTransform:'uppercase',letterSpacing:'0.5px',marginTop:2,lineHeight:1.3}}>${cfg.l}</div>
-          </div>`)}
+        <!-- Row 3: ACTIVE campaign chips (one per campaign, client-scoped, horizontally scrollable) -->
+        <div style=${{fontSize:9,color:C.mt,textTransform:'uppercase',letterSpacing:'1px',marginBottom:4}}>Active campaigns</div>
+        <div style=${{display:'flex',gap:6,overflowX:'auto',whiteSpace:'nowrap',paddingBottom:5,marginBottom:9}}>
+          ${[{k:'all',l:'All Campaigns',n:campAllCount},...campChips].map(({k,l,n})=>{const active=filterCampaign===k;return html`<button key=${'cm'+k} onClick=${()=>setFilterCampaign(k)} style=${{flex:'0 0 auto',background:active?'#4a86f522':'transparent',color:active?'#4a86f5':'#5a8ab0',border:`0.5px solid ${active?'#4a86f555':'#17304e'}`,borderRadius:20,padding:'4px 13px',fontSize:12,fontWeight:active?700:400,cursor:'pointer'}}>${l} (${n})</button>`;})}
         </div>
-
-        <!-- Campaign filter chips — count respects current status filter so chips always match what you see -->
-        <div style=${{display:'flex',gap:6,flexWrap:'wrap',marginBottom:10}}>
-          ${[
-            {k:'all',        l:'All Campaigns',   color:'#4a86f5'},
-            {k:'real_gains', l:'🏓 Real Gains',    color:'#2dd4bf'},
-            {k:'social',     l:'📸📘 TDOW Social', color:'#fb923c'},
-            {k:'email',      l:'📧 Email (all series)', color:'#4a86f5'},
-          ].map(({k,l,color})=>{
-            // Count respects the current status filter so number always matches visible items
-            const mediaBase=k==='all'?mediaAssets:mediaAssets.filter(a=>assetCampaign(a)===k);
-            const mediaFiltered=filterStatus==='all'?mediaBase:mediaBase.filter(a=>a.status===filterStatus);
-            // Add social CAs to 'all' and 'social' chip counts
-            const caFiltered=(k==='all'||k==='social')
-              ?(filterStatus==='all'?socialCAs:socialCAs.filter(ca=>CA_TO_STATUS[ca.status]===filterStatus))
-              :[];
-            const copyFiltered=(k==='all')
-              ?(filterStatus==='all'?copyItems:copyItems.filter(i=>i.status===filterStatus))
-              :[];
-            const emCaFiltered=(k==='all'||k==='email')
-              ?(filterStatus==='all'?emailCAs:emailCAs.filter(ca=>CA_TO_STATUS[ca.status]===filterStatus))
-              :[];
-            const cnt=mediaFiltered.length+caFiltered.length+copyFiltered.length+emCaFiltered.length;
-            const active=filterCampaign===k;
-            return html`<button key=${k} onClick=${()=>{setFilterCampaign(k);}} style=${{
-              background:active?color+'22':'transparent',color:active?color:'#5a8ab0',
-              border:`0.5px solid ${active?color+'55':'#17304e'}`,
-              borderRadius:20,padding:'4px 13px',fontSize:12,fontWeight:active?700:400,cursor:'pointer'
-            }}>${l} (${cnt})</button>`;
-          })}
+        <!-- Row 4: media-channel chips (click → all content for that channel across campaigns) -->
+        <div style=${{fontSize:9,color:C.mt,textTransform:'uppercase',letterSpacing:'1px',marginBottom:4}}>Media channels</div>
+        <div style=${{display:'flex',gap:6,overflowX:'auto',whiteSpace:'nowrap',paddingBottom:5,marginBottom:10}}>
+          ${[{k:'all',l:'🗂 All Channels',n:chanAllCount},...chanChips.map(c=>({k:c.k,l:(CH_CHIP[c.k]||{l:c.k}).l,n:c.n}))].map(({k,l,n})=>{const active=filterChannel===k;const col=k==='all'?'#5a8ab0':(CH_CHIP[k]||{c:'#5a8ab0'}).c;return html`<button key=${'ch'+k} onClick=${()=>setFilterChannel(k)} style=${{flex:'0 0 auto',background:active?col+'22':'transparent',color:active?col:'#5a8ab0',border:`0.5px solid ${active?col+'66':'#17304e'}`,borderRadius:20,padding:'4px 13px',fontSize:12,fontWeight:active?700:400,cursor:'pointer'}}>${l} (${n})</button>`;})}
         </div>
 
         <!-- Status filter + client dropdown -->
@@ -2538,10 +2781,11 @@ function App(){
                 <span style=${{fontSize:13}}>📦</span>
                 <span style=${{color:'#5a8ab0',fontSize:12,flex:1}}>${pendingArchiveCleanup} asset${pendingArchiveCleanup!==1?'s':''} published or rejected — open them to archive or delete and free up space.</span>
                 <button onClick=${()=>{setFilterStatus('published');}} style=${{background:'transparent',color:'#2dd4bf',border:'0.5px solid rgba(45,212,191,0.4)',borderRadius:6,padding:'4px 12px',fontSize:11,cursor:'pointer'}}>View Published</button>
+                <button onClick=${()=>{setFilterStatus('rejected');}} style=${{background:'transparent',color:'#f87171',border:'0.5px solid rgba(248,113,113,0.4)',borderRadius:6,padding:'4px 12px',fontSize:11,cursor:'pointer'}}>View Rejected</button>
               </div>`}
-              ${filteredMedia.length===0&&filteredCopy.length===0&&filteredSocialCAs.length===0&&filteredEmailCAs.length===0&&html`<div style=${{textAlign:'center',padding:'80px 20px',color:C.mt}}>
-                  <div style=${{fontSize:32,marginBottom:12}}>${mediaAssets.length===0&&copyItems.length===0&&socialCAs.length===0&&emailCAs.length===0?'📭':'🔍'}</div>
-                  <div style=${{fontSize:14}}>${mediaAssets.length===0&&copyItems.length===0&&socialCAs.length===0&&emailCAs.length===0?'No content yet — run a campaign to generate assets':'No content matches current filters'}</div>
+              ${filteredMedia.length===0&&filteredCopy.length===0&&filteredSocialCAs.length===0&&filteredEmailCAs.length===0&&filteredExtraCAs.length===0&&html`<div style=${{textAlign:'center',padding:'80px 20px',color:C.mt}}>
+                  <div style=${{fontSize:32,marginBottom:12}}>${mediaAssets.length===0&&copyItems.length===0&&socialCAs.length===0&&emailCAs.length===0&&extraCAs.length===0?'📭':'🔍'}</div>
+                  <div style=${{fontSize:14}}>${mediaAssets.length===0&&copyItems.length===0&&socialCAs.length===0&&emailCAs.length===0&&extraCAs.length===0?'No content yet — run a campaign to generate assets':'No content matches current filters'}</div>
                 </div>`}
               <!-- Media assets grid -->
               ${filteredMedia.length>0&&html`<div style=${{display:'grid',gridTemplateColumns:'repeat(auto-fill,minmax(340px,1fr))',gap:16,marginBottom:24}}>
@@ -2557,7 +2801,7 @@ function App(){
                     ✓ Approve All (${filteredSocialCAs.filter(ca=>ca.status==='pending').length})
                   </button>`}
                 </div>
-                ${filteredSocialCAs.map(ca=>html`<${SocialCaptionCard} key=${ca.id} ca=${ca} onUpdate=${handleSocialCAUpdate} onDelete=${handleSocialCADelete} />`)}
+                ${filteredSocialCAs.map(ca=>html`<${SocialCaptionCard} key=${ca.id} ca=${ca} onUpdate=${handleSocialCAUpdate} onDelete=${handleSocialCADelete} onArchive=${handleCAArchive} />`)}
               </div>`}
               <!-- Email sections — one per series (seriesName, TDOW by week_number, else subject) -->
               ${filteredEmailCAs.length>0&&(()=>{
@@ -2575,8 +2819,23 @@ function App(){
                       ✓ Approve All (${cas.filter(ca=>ca.status==='pending').length})
                     </button>`}
                   </div>
-                  ${cas.map(ca=>html`<${EmailCard} key=${ca.id} ca=${ca} onUpdate=${handleEmailCAUpdate} onDelete=${handleEmailCADelete} />`)}
+                  ${cas.map(ca=>html`<${EmailCard} key=${ca.id} ca=${ca} onUpdate=${handleEmailCAUpdate} onDelete=${handleEmailCADelete} onArchive=${handleCAArchive} />`)}
                 </div>`);
+              })()}
+              <!-- New canonical channels (TikTok · Blog · Google · Print) — one section per medium -->
+              ${filteredExtraCAs.length>0&&(()=>{
+                const groups={};
+                filteredExtraCAs.forEach(ca=>{(groups[ca.content_type]=groups[ca.content_type]||[]).push(ca);});
+                return Object.entries(groups).map(([ct,cas])=>{
+                  const m=CAMPAIGN_META[ct]||{icon:'📄',channel:ct,color:'#5a8ab0'};
+                  return html`<div key=${ct} style=${{marginBottom:24}}>
+                    <div style=${{marginBottom:12,display:'flex',alignItems:'center',gap:8}}>
+                      <span style=${{color:m.color,fontWeight:700,fontSize:10,textTransform:'uppercase',letterSpacing:'1.5px',whiteSpace:'nowrap'}}>${m.icon} ${m.channel} (${cas.length})</span>
+                      <div style=${{flex:1,height:'0.5px',background:'#17304e'}}></div>
+                    </div>
+                    ${cas.map(ca=>html`<${ChannelCard} key=${ca.id} ca=${ca} onUpdate=${handleExtraCAUpdate} onDelete=${handleExtraCADelete} onArchive=${handleCAArchive} />`)}
+                  </div>`;
+                });
               })()}
               <!-- Copy queue section (only shown if items exist) -->
               ${filteredCopy.length>0&&html`<div>
