@@ -299,9 +299,42 @@ function validateForFire(ca){
   if(copy.length<minLen) add('copy is empty or too short','human');
   else if(_AIMETA.test(copy) && !override) add('copy looks like an AI reply, not final content','human');
   if(mediaReq && !/^https?:\/\//.test(media)) add((t==='social'||t==='tiktok')?'no video/media set':'image missing','human');
-  return {ok:hard.length===0, hard, warn,
+  // Approval-time media reachability (8 Jul incident): the actual CDN probe runs ONCE, async, at the
+  // moment of approval (see runApprovalMediaCheck) — never here, this function is called synchronously
+  // dozens of times per render across every tab and can't make network calls. It just reads back
+  // whatever that probe already found, and only trusts the flag if it matches the CURRENT media url
+  // (so editing the url after a failed check doesn't keep a stale card stuck in Flagged forever).
+  if(media && fc.mediaUnreachable && fc.mediaCheckedUrl===media){
+    add('media URL unreachable (checked at approval, HTTP '+(fc.mediaCheckedStatus||'?')+') — file may be missing/renamed on the CDN','system');
+  }
+  return {ok:hard.length===0, hard, warn, media,
     needsHuman:hard.some(h=>h.cls==='human'), needsSystem:hard.some(h=>h.cls==='system'),
     reasons:hard.map(h=>h.reason)};
+}
+// Approval-time media reachability probe (8 Jul incident — the CDN reachability check used to run
+// ONLY at publish time, so a drifted/dead filename wasn't caught until send-morning). Runs once, async,
+// right after a card is approved; result is persisted onto full_content so the synchronous
+// validateForFire() above can read it back on every subsequent render without any new network calls.
+async function probeMediaReachable(url){
+  if(!url||!/^https?:\/\//.test(url))return null;
+  try{
+    const ctl=new AbortController();const timer=setTimeout(()=>ctl.abort(),8000);
+    const res=await fetch(url,{method:'HEAD',signal:ctl.signal});
+    clearTimeout(timer);
+    return {ok:res.status===200||res.status===206,status:res.status};
+  }catch(e){return {ok:false,status:0};}
+}
+// Fires the probe for a just-approved item and PATCHes the reachability flags onto full_content.
+// Call this AFTER the normal approve save; it does its own follow-up PATCH so the approve action
+// itself isn't slowed down waiting on a CDN round-trip. Returns the probe result (or null if no media).
+async function runApprovalMediaCheck(caId,mediaUrl,fullContentBase,onUpdate){
+  if(!mediaUrl||!/^https?:\/\//.test(mediaUrl))return null;
+  const r=await probeMediaReachable(mediaUrl);
+  if(!r)return null;
+  try{
+    await onUpdate(caId,{full_content:{...fullContentBase,mediaUnreachable:!r.ok,mediaCheckedUrl:mediaUrl,mediaCheckedStatus:r.status,mediaCheckedAt:new Date().toISOString()}});
+  }catch(e){}
+  return r;
 }
 
 // ── SHARED UI ────────────────────────────────────────────────
@@ -1122,7 +1155,9 @@ function ChannelCard({ca,onUpdate,onDelete,onArchive}){
     setBusy(true);
     const fcN=buildFc();const sp=schedPatch();
     await onUpdate(ca.id,{status:'approved',approved_at:new Date().toISOString(),subject:subject||ca.subject,full_content:fcN,...sp});
-    const _v=validateForFire({...ca,status:'approved',content_type:ct,full_content:fcN,subject:subject||ca.subject,scheduled_for:sp.scheduled_for||ca.scheduled_for});
+    let _v=validateForFire({...ca,status:'approved',content_type:ct,full_content:fcN,subject:subject||ca.subject,scheduled_for:sp.scheduled_for||ca.scheduled_for});
+    let _probe=null;
+    if(_v.ok&&_v.media){_probe=await runApprovalMediaCheck(ca.id,_v.media,fcN,onUpdate);if(_probe&&!_probe.ok)_v=validateForFire({...ca,status:'approved',content_type:ct,full_content:{...fcN,mediaUnreachable:true,mediaCheckedUrl:_v.media},subject:subject||ca.subject,scheduled_for:sp.scheduled_for||ca.scheduled_for});}
     if(!_v.ok)alert((isPrint?"✅ Marked produced":"✅ Approved")+" — but it WON'T fire as-is:\n\n• "+_v.reasons.join("\n• ")+"\n\nResolve in the Flagged Issue folder.");
     setBusy(false);
   }
@@ -1324,7 +1359,9 @@ function SocialCaptionCard({ca,onUpdate,onDelete}){
       youtubeUrl:newYtUrl||ca.full_content?.youtubeUrl||ca.full_content?.youtube_url||''};
     const sp=schedPatch();
     await onUpdate(ca.id,{status:'approved',approved_at:new Date().toISOString(),full_content:fc,preview_text:copyText,...sp});
-    const _v=validateForFire({...ca,status:'approved',content_type:'social',full_content:fc,preview_text:copyText,scheduled_for:sp.scheduled_for||ca.scheduled_for});
+    let _v=validateForFire({...ca,status:'approved',content_type:'social',full_content:fc,preview_text:copyText,scheduled_for:sp.scheduled_for||ca.scheduled_for});
+    let _probe=null;
+    if(_v.ok&&_v.media){_probe=await runApprovalMediaCheck(ca.id,_v.media,fc,onUpdate);if(_probe&&!_probe.ok)_v=validateForFire({...ca,status:'approved',content_type:'social',full_content:{...fc,mediaUnreachable:true,mediaCheckedUrl:_v.media},preview_text:copyText,scheduled_for:sp.scheduled_for||ca.scheduled_for});}
     if(!_v.ok)alert("✅ Approved — but it WON'T fire as-is:\n\n• "+_v.reasons.join("\n• ")+"\n\nIt's held OUT of the Schedule until fixed. 🛠 system issues self-heal; ⚠️ items need you.");
     setBusy(false);
   }
@@ -1571,7 +1608,9 @@ function EmailCard({ca,onUpdate,onDelete}){
     setBusy(true);
     const _fc=buildFC(), _sp=schedPatch();
     await onUpdate(ca.id,{status:'approved',approved_at:new Date().toISOString(),full_content:_fc,subject:subj||ca.subject,preview_text:body,..._sp});
-    const _v=validateForFire({...ca,status:'approved',content_type:'email',full_content:_fc,subject:subj||ca.subject,preview_text:body,scheduled_for:_sp.scheduled_for||ca.scheduled_for});
+    let _v=validateForFire({...ca,status:'approved',content_type:'email',full_content:_fc,subject:subj||ca.subject,preview_text:body,scheduled_for:_sp.scheduled_for||ca.scheduled_for});
+    let _probe=null;
+    if(_v.ok&&_v.media){_probe=await runApprovalMediaCheck(ca.id,_v.media,_fc,onUpdate);if(_probe&&!_probe.ok)_v=validateForFire({...ca,status:'approved',content_type:'email',full_content:{..._fc,mediaUnreachable:true,mediaCheckedUrl:_v.media},subject:subj||ca.subject,preview_text:body,scheduled_for:_sp.scheduled_for||ca.scheduled_for});}
     if(!_v.ok)alert("✅ Approved — but it WON'T fire as-is:\n\n• "+_v.reasons.join("\n• ")+"\n\nIt's held OUT of the Schedule until fixed. 🛠 system issues self-heal; ⚠️ items need you.");
     setBusy(false);
   }
