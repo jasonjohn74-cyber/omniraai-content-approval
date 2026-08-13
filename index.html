@@ -626,7 +626,12 @@ function MediaAssetCard({asset,onUpdate,onArchive,onDelete,weekInfo}){
     const url=await db.uploadToStorage(file,path);
     if(url){
       const revNum=(revisions.length||0)+1;
-      await db.logAssetRevision({id:uid(),asset_id:asset.id,revision_number:revNum,asset_url:url,provider:'manual_upload',feedback:'Manual upload by user',source:'manual_upload'});
+      // NOTE: do NOT send an `id` — asset_revisions.id is a uuid column defaulting to
+      // gen_random_uuid(), while uid() emits a short base36 string. Sending it returned
+      // 22P02 invalid-uuid on every manual upload, so the revision history silently never
+      // recorded manual overrides (the upload itself still succeeded — fetch doesn't throw
+      // on 400, so the failure was invisible). Fixed 10 Aug.
+      await db.logAssetRevision({asset_id:asset.id,revision_number:revNum,asset_url:url,provider:'manual_upload',feedback:'Manual upload by user',source:'manual_upload'});
       const updated={...asset,asset_url:url,provider:'manual_upload',status:'pending_review'};
       await onUpdate(updated);
       setImgError(false);
